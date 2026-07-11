@@ -120,19 +120,24 @@ const float KP_REGLER  = 0.0f;        // Proportionalanteil (0 = reiner I-Regler
 const float KI_REGLER  = 0.15f;       // Integralverstaerkung pro Takt. 2026-07-10: 0.30 -> 0.15, weil bei
                                       //   schwankender PV/Last Hunting (+-500-600W) gegen die ~10s Totzeit; 0.15 = ruhiger.
 const long  DEADBAND_W = 20;          // Totband um TARGET_GRID_W (W) -> keine Reaktion auf Messrauschen
-const long  SLEW_W     = 300;         // max. Aenderung des Integralanteils pro Takt (W) -> sanfte Bewegung
+// RICHTUNGS-ABHAENGIGE Slew (2026-07-11, Relais-Schonung): Anpassung in die GLEICHE Richtung zuegig;
+//   Nulldurchgang Laden<->Entladen (Vorzeichenwechsel = ggf. internes Relais) DEUTLICH langsamer/gedaempft.
+const long  SLEW_SAME_W     = 500;    // max. Integralschritt/Takt bei gleicher Richtung (bzw. Abbau fern von 0): zuegig.
+const long  SLEW_REVERSAL_W = 120;    // max. Integralschritt/Takt in der Umschalt-Zone nahe 0: SANFT (Relais schonen).
+const long  REVERSAL_BAND_W = 400;    // |Sollwert| <= 400 UND Richtung dreht -> Umschalt-Zone -> SLEW_REVERSAL_W.
 const long  MODE_HYST_W = 40;         // Mode-Totband (W): |Sollwert| < 40 -> idle. Trennt Laden/Entladen um 2x40W
                                       //   -> verhindert Input<->Output-Modus-Flattern (Relais) am Nulldurchgang.
-// ASYMMETRISCHER SLEW + GEGENRICHTUNGS-ABBRUCH (2026-07-10, aus Windup-Test 17:16: Last-Wegfall -> -2459W
-//   Einspeise-Ueberschwinger, weil Integrator slew-langsam von 2400 auf 0 rampte). "Fail toward safe fast":
-const long  SLEW_FAST_W    = 1200;    // Richtung 0 (Aktuierung ABBAUEN = sicher): 4x schneller als SLEW_W.
+// GEGENRICHTUNGS-ABBRUCH (Feed-in-Schutz, 2026-07-10): schneller Stop auf dem ROHEN Netz. Der fruehere asymm.
+//   "toward-zero fast"-Slew ist ersetzt durch RETREAT_RAW_W (harter Stop) + die richtungs-abhaengige Slew oben.
 const long  RETREAT_RAW_W = 300;      // Feed-in-Schutz auf dem ROHEN Netz: entladen trotz Einspeisung > 300W (oder
                                       //   laden trotz Bezug > 300W) -> Integrator SOFORT auf 0. Hoch genug, dass kleine
                                       //   Blinker durchlaufen (PI regelt die gefiltert), aber echter grosser Wegfall sofort stoppt.
 // NETZ-TIEFPASS (2026-07-11, aus Nachtlauf: Abend-Std 700-900W durch Jagen taktender Lasten -> Loecher treffen).
 //   EMA auf gridPowerW -> Regler+Retreat regeln den MITTELWERT ("Ruhe"). tau > Aktuator-Totzeit (~10s), damit
 //   Sekunden-Blinker ausgemittelt werden, echte (langsame) Laststufen aber noch durchkommen. Poll ~1s.
-const float GRID_FILT_TAU_S = 25.0f;  // Zeitkonstante (s). alpha = dt/tau (dt>tau -> alpha=1 = Auto-Reinit nach Luecke).
+const float GRID_FILT_TAU_S = 15.0f;  // Zeitkonstante (s). 2026-07-11 Feintuning: 25 -> 15s -> reagiert ~40% schneller
+                                      //   auf echte Laststufen + mehr Phasenreserve (weniger Filter-Lag); bleibt >~Totzeit(10s),
+                                      //   Ruhe erhalten. KI bewusst unveraendert (Stabilitaet). alpha = dt/tau (dt>=tau -> Auto-Reinit).
 
 // ---- MQTT-Topics (echte Zendure-HA-Discovery-Topics, am Geraet verifiziert 2026-07-10) ------
 const char* T_HEARTBEAT = "regler/heartbeat";
@@ -152,7 +157,7 @@ const char* T_MINSOC_SET   = "Zendure/number/" SECRET_ZEN_SN "/minSoc/set";     
 const char* T_SETPOINT_DBG = "regler/setpoint_debug";
 
 // ---- Firmware-Version (fuer /status + Baseline-/Versions-Check) -------------
-#define FW_VERSION  "regler-1.14.0"  // 1.14.0: ZWEI-SIGNAL: PI regelt GEFILTERT (Ruhe), Feed-in-Retreat auf ROHEM Netz (RETREAT_RAW_W=300, schnell gegen echten Last-Wegfall statt Filter-Lag). Basis 1.13.0 Tiefpass
+#define FW_VERSION  "regler-1.17.0"  // 1.17.0: Retreat resettet jetzt den Tiefpass (gridPowerFilt=gridPowerW) -> kein PI-vs-Retreat-Flattern nach grossem Last-Wegfall (Filter-Lag). Basis 1.16.0 (richtungs-abh. Slew)
 SET_LOOP_TASK_STACK_SIZE(12288);     // loop-Task-Stack auf 12 KB anheben (Default 8192); Arduino-ESP32-Makro
 uint32_t bootCount = 0;              // persistenter Reset-Zaehler (NVS) -> erkennt Resets ueber Neustarts hinweg
 
@@ -326,17 +331,23 @@ long computeSetpoint() {
   //   kleine Blinker (<Schwelle) ignoriert (kein Saegezahn), ECHTER grosser Wegfall SOFORT gestoppt.
   //     entladen (integ>0) trotz Einspeisung > RETREAT_RAW_W  ODER  laden (integ<0) trotz Bezug > RETREAT_RAW_W
   //   -> Integrator SOFORT auf 0 -> publishSetpoint sendet Idle + Stop-Burst. "fail toward safe fast".
+  //   ZUSATZ (2026-07-11): dabei den TIEFPASS auf das rohe Netz RESETTEN (gridPowerFilt = gridPowerW). Feuert
+  //   der Retreat, ist der gefilterte Wert nachweislich veraltet (grosser Regimewechsel) -> ohne Reset wuerde
+  //   der PI ~tau lang die alte Richtung wollen und gegen den Retreat flattern (Nachdrall nach grossem Wegfall).
   if ((ctrlInteg > 0.0f && gridPowerW >  RETREAT_RAW_W) ||
-      (ctrlInteg < 0.0f && gridPowerW < -RETREAT_RAW_W)) { ctrlInteg = 0.0f; cntRetreat++; return 0; }
+      (ctrlInteg < 0.0f && gridPowerW < -RETREAT_RAW_W)) { ctrlInteg = 0.0f; gridPowerFilt = (float)gridPowerW; cntRetreat++; return 0; }
 
   ctrlDeadband = (fehler > -DEADBAND_W && fehler < DEADBAND_W);
   if (ctrlDeadband) fehler = 0;                                 // Totband -> kein Jagen auf Rauschen
 
-  // --- 3. Integralschritt mit ASYMMETRISCHER Slew-Begrenzung ---
-  //   Richtung 0 (|integ| sinkt = Aktuierung abbauen = sicher) -> SLEW_FAST_W (schnell). Von 0 weg -> SLEW_W (sanft).
+  // --- 3. Integralschritt mit RICHTUNGS-ABHAENGIGER Slew (Relais-Schonung) ---
+  //   Gleiche Richtung (Stellwert waechst) ODER Abbau FERN von 0 -> zuegig (SLEW_SAME_W). Aber Abbau/Umschalten
+  //   NAHE 0 (Vorzeichenwechsel Laden<->Entladen -> ggf. internes Relais) -> LANGSAM (SLEW_REVERSAL_W): der
+  //   Nulldurchgang wird sanft, wenige Schaltzyklen. Feed-in-Sicherheit bleibt schnell (harter RETREAT_RAW_W ueberschreibt).
   float delta = KI_REGLER * (float)fehler;
-  bool awayFromZero = (delta > 0.0f) == (ctrlInteg >= 0.0f);   // gleiches Vorzeichen -> |integ| waechst
-  long lim = awayFromZero ? SLEW_W : SLEW_FAST_W;
+  bool sameDir = (delta >= 0.0f) == (ctrlInteg >= 0.0f);                        // Stellwert waechst in aktueller Richtung?
+  bool reversalZone = !sameDir && (ctrlInteg <= (float)REVERSAL_BAND_W && ctrlInteg >= -(float)REVERSAL_BAND_W);
+  long lim = reversalZone ? SLEW_REVERSAL_W : SLEW_SAME_W;    // Umschalt-Zone nahe 0 -> sanft, sonst zuegig
   ctrlSlew = (delta > lim || delta < -lim);                   // Diagnose: Slew-Begrenzung aktiv?
   if (delta >  lim) delta =  lim;
   if (delta < -lim) delta = -lim;
