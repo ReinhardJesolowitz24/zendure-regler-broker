@@ -88,11 +88,11 @@ den Kreis: Shelly → Regler → Broker → Zendure → zurück.*
 
 **Broker (`mqtt_broker/`)**
 - Anonymer PicoMQTT-Broker + **Enforcer (L2)**: idlet das Gerät aktiv, wenn der Regler-Heartbeat ausbleibt.
-- **Gate g — unabhängiger Endwert-Monitor (Gatekeeper):** der Regler stellt nur *Anträge* (`regler/cmd/*`), der Broker validiert jeden gegen **absolute Geräte-Physik** (Bereich, nie negativ, SoC-Floor) und ist **einziger Schreiber ans Gerät**. Auf getrennter MCU → deckt Regler-Fehler (RAM/ROM/Logik) *und* Fremd-Publish, **unabhängig von Regler-Updates**. Doer/Checker getrennt.
+- **Gate g — unabhängiger Endwert-Monitor (Gatekeeper):** der Regler stellt nur *Anträge* (`regler/cmd/*`), der Broker validiert jeden gegen **absolute Geräte-Physik** (Bereich, nie negativ, SoC-Floor) und ist **einziger Schreiber ans Gerät**; ein **Override-Watchdog** fängt zusätzlich Direkt-Publishes *am Gate vorbei* ab (fehlerhafter Regler / Fremdgerät → Safe). Auf getrennter MCU → deckt Regler-Fehler (RAM/ROM/Logik) *und* Fremd-Publish, **unabhängig von Regler-Updates**. Doer/Checker getrennt.
 
 Beide bieten eine read-only **`GET /status`**-API (Port 80, JSON) für Diagnose/Baseline.
 
-**Offen / in Arbeit:** Gate-g-Override-Watchdog (Increment 2, Direkt-Publish-Bypass absichern) + externe Alarmierung (**L3**) als Voraussetzung für *unbeaufsichtigten* Dauerbetrieb.
+**Offen / in Arbeit:** externe Alarmierung (**L3**) bei Trip/Regler-Stumm — die letzte Voraussetzung für *unbeaufsichtigten* Dauerbetrieb.
 
 ## Grenzen anpassen (Konfiguration)
 
