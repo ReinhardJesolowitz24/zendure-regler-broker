@@ -69,6 +69,13 @@ den Kreis: Shelly → Regler → Broker → Zendure → zurück.*
 3. Zendure-App: **„Add to HEMS" → disable**, dann **Device Settings → MQTT** → reservierte Broker-IP eintragen (anonym).
    Falls die App keine eigene Broker-IP zulässt: `solarflow-bt-manager` (BT, s. u.) oder ein DNS-Relay.
 
+### Board tauschen (Update vs. Defekt) — IP-Handover beachten
+- **Firmware-Update an einem vorhandenen Board:** einfach neu flashen — **MAC bleibt, IP bleibt**, nichts am Router. (Immer *dasselbe* Board flashen, nicht ein Ersatz-Board für ein Update nehmen.)
+- **Defekt-Tausch gegen ein Ersatz-Board:** das neue Board hat eine **andere MAC** → die DHCP-Reservierung im Router passt nicht mehr:
+  - **Broker-Ersatz** (kritisch): die reservierte Broker-IP im Router auf die **neue MAC** umtragen — der Broker **muss** seine feste IP behalten (Regler *und* Zendure zeigen darauf). Alternativ feste IP im Broker-Code (`ETH.config()`).
+  - **Regler-Ersatz** (unkritisch): Regler ist DHCP-Client, kennt nur die Broker-IP → einfach flashen.
+  - Der Serial-Monitor zeigt beim Boot **IP + MAC** → genau diese MAC im Router eintragen.
+
 ## Status
 **Funktionsfähig und im scharfen Betrieb getestet** — bidirektionale Nulleinspeisung, lokal, cloud-frei.
 
