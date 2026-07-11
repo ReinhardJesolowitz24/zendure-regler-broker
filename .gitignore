@@ -1,0 +1,14 @@
+# Secrets -- niemals echte Zugangsdaten/IPs committen!
+arduino_secrets.h
+**/arduino_secrets.h
+
+# Arduino / Build-Artefakte
+build/
+*.bin
+*.elf
+*.hex
+*.map
+
+# IDE / OS
+.vscode/
+.DS_Store
