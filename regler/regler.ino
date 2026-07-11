@@ -155,9 +155,20 @@ const char* T_GRIDREV_SET  = "Zendure/select/" SECRET_ZEN_SN "/gridReverse/set";
 const char* T_MINSOC_SET   = "Zendure/number/" SECRET_ZEN_SN "/minSoc/set";        // Backstop: kein Tiefentladen
 // Chunk 1 Diagnose: berechneter Sollwert (NUR beobachten, NICHT ans Geraet)
 const char* T_SETPOINT_DBG = "regler/setpoint_debug";
+// GATE g (Gatekeeper): der Regler publiziert NICHT mehr direkt auf Zendure/.../set, sondern stellt ANTRAEGE auf
+//   regler/cmd/*. Der BROKER validiert (absolute Physik) und ist einziger Schreiber ans Geraet (s. 02_gate-g).
+//   -> Broker MUSS mit GATE_ENABLE laufen, sonst erreichen die Antraege das Geraet nicht (Broker zuerst flashen!).
+const char* T_CMD_OUTLIMIT = "regler/cmd/outputLimit";
+const char* T_CMD_INLIMIT  = "regler/cmd/inputLimit";
+const char* T_CMD_ACMODE   = "regler/cmd/acMode";
+// INTERNER Level-1-Monitor (Endwert-Check vor dem Antrag; deckt zufaellige Regler-Fehler frueh; NICHT common-cause-fest
+//   -> dafuer der Broker-Gate auf getrennter MCU). Eigene Grenzen, uint16_t (dokumentiert nicht-negativ; im Vergleich
+//   Integer-Promotion nach 32-bit signed int -> kein Unsigned-Wrap-Fallstrick).
+const uint16_t MON_DISCHARGE_MAX_W = 2400;   // unabhaengig von ZEN_MAX_W
+const uint16_t MON_CHARGE_MAX_W    = 2400;   // unabhaengig von ZEN_CHARGE_MAX_W
 
 // ---- Firmware-Version (fuer /status + Baseline-/Versions-Check) -------------
-#define FW_VERSION  "regler-1.17.0"  // 1.17.0: Retreat resettet jetzt den Tiefpass (gridPowerFilt=gridPowerW) -> kein PI-vs-Retreat-Flattern nach grossem Last-Wegfall (Filter-Lag). Basis 1.16.0 (richtungs-abh. Slew)
+#define FW_VERSION  "regler-1.18.0"  // 1.18.0: GATE g - publishSetpoint stellt ANTRAEGE auf regler/cmd/* (Broker validiert+ist einziger Geraete-Schreiber); interner L1-Monitor (Endwert vs MON_*_MAX). BROKER MUSS mit GATE_ENABLE laufen (zuerst flashen!). Basis 1.17.0
 SET_LOOP_TASK_STACK_SIZE(12288);     // loop-Task-Stack auf 12 KB anheben (Default 8192); Arduino-ESP32-Makro
 uint32_t bootCount = 0;              // persistenter Reset-Zaehler (NVS) -> erkennt Resets ueber Neustarts hinweg
 
@@ -185,7 +196,7 @@ long  ctrlFehler = 0;          // Regelabweichung W vor Totband (Diagnose -> /st
 long  ctrlDelta  = 0;          // letzter Integralschritt W, slew-limitiert (Diagnose)
 bool  ctrlSlew   = false;      // Slew-Rate-Begrenzung war aktiv (Diagnose)
 bool  ctrlDeadband = false;    // Totband war aktiv (Diagnose)
-unsigned long cntPub=0, cntShellyFail=0, cntShellyRetry=0, cntMqttReconn=0, cntRetreat=0;  // Zaehler (Diagnose)
+unsigned long cntPub=0, cntShellyFail=0, cntShellyRetry=0, cntMqttReconn=0, cntRetreat=0, cntMonTrip=0;  // Zaehler (Diagnose); cntMonTrip=interner L1-Monitor
 uint64_t      cntTele=0;       // empfangene Zendure-Telemetrie (hohe Rate -> 64-bit gegen Ueberlauf)
 static volatile bool eth_up = false;   // volatile: wird im Netzwerk-Event-Task geschrieben, im loop-Task gelesen
 char  buf[256];
@@ -365,14 +376,11 @@ long computeSetpoint() {
   return (long)(u >= 0.0f ? u + 0.5f : u - 0.5f);
 }
 
-// Signierten Sollwert an die Zendure (Chunk 4). >0 ENTLADEN (outputLimit+acMode=Output),
-//   <0 LADEN (inputLimit=|w|+acMode=Input), |w|<MODE_HYST_W IDLE (beide 0).
-//   MODE-HYSTERESE: die idle-Zone [-40,+40] trennt Laden/Entladen -> fuer einen Richtungswechsel muss der
-//     Sollwert die ganze Zone durchlaufen -> KEIN Input<->Output-Relais-Flattern am Nulldurchgang.
-//   QoS0-Robustheit: acMode+Limit werden JEDEN Takt neu gesendet (verlorenes Paket kommt 2s spaeter);
-//     Modewechsel nullt zusaetzlich die Gegenrichtung, Uebergang auf idle als BURST. Alle Verlustpfade
-//     fallen SICHER (acMode-Verlust => Gegenrichtung steht auf 0 => idle, nie ungewolltes Laden/Entladen).
-//   ACTUATE_ENABLE=false -> nur Debug-Topic (signierter Wert), Geraet unangetastet.
+// Signierten Sollwert ALS ANTRAG an den Gate (regler/cmd/*), NICHT direkt ans Geraet. >0 ENTLADEN, <0 LADEN,
+//   |w|<MODE_HYST_W IDLE. Der BROKER validiert (absolute Physik) + ist einziger Schreiber ans Geraet (Gate g).
+//   MODE-HYSTERESE (idle-Zone [-40,+40]) + QoS0-Wiederholung jeden Takt + Burst auf idle: unveraendert.
+//   INTERNER Level-1-Monitor: Endwert-Betrag gegen eigene Grenze -> Verletzung = idle beantragen (SAFE).
+//   ACTUATE_ENABLE=false -> nur Debug-Topic, kein Antrag.
 void publishSetpoint(long w) {
   cntPub++;
   int desired = (w >= MODE_HYST_W) ? 1 : (w <= -MODE_HYST_W ? 2 : 0);    // 1=Entladen 2=Laden 0=idle
@@ -382,22 +390,26 @@ void publishSetpoint(long w) {
     ctrlActMode = desired;                        // Diagnose auch im Dry-Run sichtbar
     return;
   }
+  // INTERNER Level-1-Monitor: |Endwert| ueber eigener Grenze -> Regler-interner Defekt -> idle beantragen.
+  long mag = (w >= 0) ? w : -w;
+  long lim = (w >= 0) ? (long)MON_DISCHARGE_MAX_W : (long)MON_CHARGE_MAX_W;   // Promotion -> signed-Vergleich
+  if (mag > lim) { w = 0; desired = 0; cntMonTrip++; }
   bool changed = (desired != ctrlActMode);
-  if (desired == 1) {                             // ENTLADEN
-    mqtt.publish(T_ACMODE_SET, "Output mode");
-    if (changed) mqtt.publish(T_INLIMIT_SET, "0");   // Gegenrichtung beim Wechsel sicher auf 0
+  if (desired == 1) {                             // ENTLADEN (Antrag)
+    mqtt.publish(T_CMD_ACMODE, "Output mode");
+    if (changed) mqtt.publish(T_CMD_INLIMIT, "0");   // Gegenrichtung beim Wechsel sicher auf 0
     snprintf(buf, sizeof(buf), "%ld", w);
-    mqtt.publish(T_OUTLIMIT_SET, buf);
-  } else if (desired == 2) {                      // LADEN
-    mqtt.publish(T_ACMODE_SET, "Input mode");
-    if (changed) mqtt.publish(T_OUTLIMIT_SET, "0");  // Gegenrichtung beim Wechsel sicher auf 0
+    mqtt.publish(T_CMD_OUTLIMIT, buf);
+  } else if (desired == 2) {                      // LADEN (Antrag)
+    mqtt.publish(T_CMD_ACMODE, "Input mode");
+    if (changed) mqtt.publish(T_CMD_OUTLIMIT, "0");  // Gegenrichtung beim Wechsel sicher auf 0
     snprintf(buf, sizeof(buf), "%ld", -w);           // Lade-Betrag = |w|
-    mqtt.publish(T_INLIMIT_SET, buf);
+    mqtt.publish(T_CMD_INLIMIT, buf);
   } else {                                        // IDLE: beide Richtungen 0
-    mqtt.publish(T_OUTLIMIT_SET, "0");
-    mqtt.publish(T_INLIMIT_SET, "0");
+    mqtt.publish(T_CMD_OUTLIMIT, "0");
+    mqtt.publish(T_CMD_INLIMIT, "0");
     if (changed) {                                // Uebergang aktiv -> idle: Burst (QoS0-robust, schneller sicher)
-      for (int k = 0; k < 4; k++) { delay(30); mqtt.publish(T_OUTLIMIT_SET, "0"); mqtt.publish(T_INLIMIT_SET, "0"); }
+      for (int k = 0; k < 4; k++) { delay(30); mqtt.publish(T_CMD_OUTLIMIT, "0"); mqtt.publish(T_CMD_INLIMIT, "0"); }
     }
   }
   ctrlActMode = desired;
@@ -440,7 +452,7 @@ void handleHttpStatus() {
     "\"integ\":%ld,\"fehler_w\":%ld,\"delta_w\":%ld,\"slew_active\":%s,\"deadband_active\":%s,"
     "\"grid_stale\":%s,\"tele_stale\":%s,\"discharge_blocked\":%s,\"charge_blocked\":%s,\"soc_old\":%s,\"act_mode\":%d,\"saturated\":%s,"
     "\"tele_age_s\":%ld,\"soc_age_s\":%ld,\"shelly_ok\":%s,\"shelly_age_s\":%ld,"
-    "\"pub_count\":%lu,\"tele_count\":%llu,\"shelly_fail\":%lu,\"shelly_retry\":%lu,\"mqtt_reconn\":%lu,\"retreat_count\":%lu}",
+    "\"pub_count\":%lu,\"tele_count\":%llu,\"shelly_fail\":%lu,\"shelly_retry\":%lu,\"mqtt_reconn\":%lu,\"retreat_count\":%lu,\"mon_trip_count\":%lu}",
     FW_VERSION, __DATE__, __TIME__, ACTUATE_ENABLE ? "true" : "false",
     (unsigned long)(esp_timer_get_time() / 1000000LL), (unsigned long)bootCount,
     (int)esp_reset_reason(), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
@@ -450,7 +462,7 @@ void handleHttpStatus() {
     (long)(ctrlInteg + 0.5f), ctrlFehler, ctrlDelta, ctrlSlew ? "true" : "false", ctrlDeadband ? "true" : "false",
     ctrlGridStale ? "true" : "false", ctrlTeleStale ? "true" : "false", ctrlBlocked ? "true" : "false", ctrlChargeBlocked ? "true" : "false", ctrlSocOld ? "true" : "false", ctrlActMode, (setpointW >= ZEN_MAX_W || setpointW <= -ZEN_CHARGE_MAX_W) ? "true" : "false",
     teleAge, socAge, shellyOk ? "true" : "false", shellyAge,
-    (unsigned long)cntPub, (unsigned long long)cntTele, (unsigned long)cntShellyFail, (unsigned long)cntShellyRetry, (unsigned long)cntMqttReconn, (unsigned long)cntRetreat);
+    (unsigned long)cntPub, (unsigned long long)cntTele, (unsigned long)cntShellyFail, (unsigned long)cntShellyRetry, (unsigned long)cntMqttReconn, (unsigned long)cntRetreat, (unsigned long)cntMonTrip);
   if (n < 0) n = 0; else if (n >= (int)sizeof(body)) n = (int)sizeof(body) - 1;  // Content-Length nie > tatsaechlich gesendet
 
   client.print("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"

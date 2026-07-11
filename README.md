@@ -87,11 +87,12 @@ den Kreis: Shelly → Regler → Broker → Zendure → zurück.*
 - **Schneller Feed-in-Schutz** auf dem *rohen* Netzsignal (Gegenrichtungs-Abbruch bei echtem Last-Wegfall).
 
 **Broker (`mqtt_broker/`)**
-- Anonymer PicoMQTT-Broker + **Enforcer (L2)**: idlet das Gerät aktiv, wenn der Regler-Heartbeat ausbleibt (Defense-in-Depth, Doer/Checker getrennt).
+- Anonymer PicoMQTT-Broker + **Enforcer (L2)**: idlet das Gerät aktiv, wenn der Regler-Heartbeat ausbleibt.
+- **Gate g — unabhängiger Endwert-Monitor (Gatekeeper):** der Regler stellt nur *Anträge* (`regler/cmd/*`), der Broker validiert jeden gegen **absolute Geräte-Physik** (Bereich, nie negativ, SoC-Floor) und ist **einziger Schreiber ans Gerät**. Auf getrennter MCU → deckt Regler-Fehler (RAM/ROM/Logik) *und* Fremd-Publish, **unabhängig von Regler-Updates**. Doer/Checker getrennt.
 
 Beide bieten eine read-only **`GET /status`**-API (Port 80, JSON) für Diagnose/Baseline.
 
-**Offen / in Arbeit:** Regler-Feintuning (Filter-Zeitkonstante, Verstärkung), Invarianten-Monitor + externe Alarmierung (L3) als Voraussetzung für *unbeaufsichtigten* Dauerbetrieb.
+**Offen / in Arbeit:** Gate-g-Override-Watchdog (Increment 2, Direkt-Publish-Bypass absichern) + externe Alarmierung (**L3**) als Voraussetzung für *unbeaufsichtigten* Dauerbetrieb.
 
 ## Grenzen anpassen (Konfiguration)
 
@@ -109,11 +110,11 @@ Die Werte, die man am ehesten an die eigene Anlage anpasst (Akkugröße, Einspei
 
 Der Regel-Kern (`KI_REGLER`, `GRID_FILT_TAU_S`, `SLEW_*`, `RETREAT_RAW_W`) ist **Regelungs-Tuning** — normalerweise nicht anzufassen.
 
-> ⚠️ **Geplant (Gate g):** eine **unabhängige Monitor-Ebene auf dem Broker** mit eigenen absoluten Backstop-Grenzen
-> (`DEV_MAX_W`, `MON_SOC_FLOOR`). Dann gilt die **Bracket-Regel: die Broker-Grenzen müssen die Regler-Grenzen einrahmen**
-> (Broker weiter/absoluter: `DEV_MAX_W ≥ ZEN_MAX_W`, `MON_SOC_FLOOR ≤ SOC_STOP_DISCHARGE`). Wer eine Regler-Grenze
-> *über* die Broker-Grenze hinaus ändert, muss die Broker-Grenze **mit-anpassen** — sonst greift der Monitor im
-> Normalbetrieb (Dauer-Safe-State). SoC-Backstop **nie < 10 %**.
+> ✅ **Gate g (unabhängiger Broker-Monitor, implementiert):** die **absoluten Backstop-Grenzen** `DEV_MAX_W` und
+> `MON_SOC_FLOOR` liegen in **`mqtt_broker/mqtt_broker.ino`**. Es gilt die **Bracket-Regel: die Broker-Grenzen müssen
+> die Regler-Grenzen einrahmen** (Broker weiter/absoluter: `DEV_MAX_W ≥ ZEN_MAX_W`, `MON_SOC_FLOOR ≤ SOC_STOP_DISCHARGE`).
+> Wer eine Regler-Grenze *über* die Broker-Grenze hinaus ändert, muss die Broker-Grenze **mit-anpassen** — sonst
+> greift der Monitor im Normalbetrieb (Dauer-Safe-State). SoC-Backstop **nie < 10 %**.
 
 ## Credits / Quellen
 

@@ -53,7 +53,7 @@
 #define PIN_ETH_RST    9     // -1 falls nicht verbunden
 
 // ---- Firmware-Version (fuer /status + Baseline-/Versions-Check) -------------
-#define FW_VERSION  "broker-1.9.0"   // 1.9.0: ENFORCER_ENABLE=TRUE (L2 scharf fuer unbeaufsichtigten Nachtlauf); nullt beide Richtungen bei Heartbeat-Verlust >10s
+#define FW_VERSION  "broker-1.10.0"  // 1.10.0: GATE g (Gatekeeper) - validiert Regler-Antraege regler/cmd/* gegen absolute Physik (I1 Range/I2 negativ/I4 SoC-Floor 15%), einziger Geraete-Schreiber; /status monitor_trip_count. Enforcer (L2) bleibt. Increment 1 (Override-Watchdog = spaeter)
 SET_LOOP_TASK_STACK_SIZE(12288);     // loop-Task-Stack auf 12 KB anheben (Default 8192); Arduino-ESP32-Makro
 uint32_t bootCount = 0;              // persistenter Reset-Zaehler (NVS) -> erkennt Resets ueber Neustarts hinweg
 const uint32_t WDT_TIMEOUT_MS = 12000;  // HW-Watchdog: loop-Hang laenger -> Reboot. 12s faengt auch etwas
@@ -88,6 +88,17 @@ const char* T_HEARTBEAT    = "regler/heartbeat";
 const char* T_OUTLIMIT_SET = "Zendure/number/" ZEN_DEV "/outputLimit/set";
 const char* T_INLIMIT_SET  = "Zendure/number/" ZEN_DEV "/inputLimit/set";   // Chunk 4: Laden ebenfalls stoppen
 const char* T_ACMODE_SET   = "Zendure/select/" ZEN_DEV "/acMode/set";
+// ---- GATE g (Gatekeeper, 2026-07-11): Broker validiert die Regler-ANTRAEGE (regler/cmd/*) gegen ABSOLUTE
+//   Geraete-Physik und ist EINZIGER Schreiber ans Geraet. Unabhaengig von der Regler-Config (regler-update-fest).
+//   Grenzen als uint (dokumentiert nicht-negativ; im Vergleich Promotion nach 32-bit signed int -> kein Wrap).
+//   Bracket-Regel (s. 02_gate-g §8c): DEV_MAX_W >= Regler-ZEN_MAX_W ; MON_SOC_FLOOR <= Regler-SOC_STOP_DISCHARGE, NIE < 10%.
+const bool     GATE_ENABLE   = true;   // MASTER: Gatekeeper aktiv? (Regler routet auf regler/cmd/* -> braucht dies zum Aktuieren!)
+const uint16_t DEV_MAX_W     = 2400;   // absolute Leistungsgrenze [W]
+const uint8_t  MON_SOC_FLOOR = 15;     // Backstop-Entlade-Floor [%] (Entladen darunter -> Safe)
+const char* T_CMD_OUTLIMIT = "regler/cmd/outputLimit";
+const char* T_CMD_INLIMIT  = "regler/cmd/inputLimit";
+const char* T_CMD_ACMODE   = "regler/cmd/acMode";
+const char* T_SOC          = "Zendure/sensor/" ZEN_DEV "/electricLevel";   // fuer I4 (SoC-Floor)
 const bool          ENFORCER_ENABLE     = true;   // MASTER: Enforcer scharf. 2026-07-10 Nachtlauf (L2 fuer unbeaufsichtigt scharfen Regler)
 const unsigned long ENFORCER_TIMEOUT_MS = 10000;  // Heartbeat laenger weg -> Regler gilt als tot
 const unsigned long ENFORCER_REPUB_MS   = 1000;   // solange still: out=0 + in=0 alle 1s neu senden
@@ -95,6 +106,10 @@ unsigned long lastHeartbeatMs = 0;                // letzter regler/heartbeat (i
 unsigned long lastEnforceMs   = 0;                // letztes Enforcer-Safe-Kommando
 uint32_t      enforceCount    = 0;                // wie oft eingegriffen (Diagnose)
 bool          enforcerActive  = false;            // aktueller Zustand (Diagnose)
+// Gate-Zustand:
+long          gateSoc      = -1;                  // letzter electricLevel (%), -1 = unbekannt (I4 nur wenn >=0)
+uint32_t      monTripCount = 0;                   // wie oft eine Invariante verletzt -> Safe erzwungen
+int           lastTripInv  = 0;                   // Diagnose: 1=Range 2=Negativ 4=SoC-Floor 8=Parse 16=acMode
 
 void onNetEvent(arduino_event_id_t event) {
   if (event == ARDUINO_EVENT_ETH_GOT_IP) {
@@ -106,6 +121,33 @@ void onNetEvent(arduino_event_id_t event) {
     ethDownCount++;
     Serial.println("ETH down");
   }
+}
+
+// ---- GATE g: Validierung der Regler-Antraege + Weiterreichen ans Geraet (oder Safe) ----
+//   Prueft I8(Parse)/I2(negativ)/I1(Range)/I4(SoC-Floor); reicht bei OK den ORIGINAL-Payload weiter, sonst 0.
+//   uint-Grenzen -> Integer-Promotion nach 32-bit signed int im Vergleich -> KEIN Unsigned-Wrap.
+void gateForwardOutput(const char* p) {                 // ENTLADEN-Antrag
+  char* end = nullptr; long v = strtol(p, &end, 10);
+  int inv = 0;
+  if (end == p || *end != '\0')                                   inv = 8;   // nicht rein-numerisch
+  else if (v < 0)                                                 inv = 2;   // I2: nie negativ
+  else if (v > (long)DEV_MAX_W)                                   inv = 1;   // I1: nie ueber Geraete-Physik
+  else if (v > 0 && gateSoc >= 0 && gateSoc <= (int)MON_SOC_FLOOR) inv = 4;  // I4: kein Entladen unter Floor
+  if (inv) { monTripCount++; lastTripInv = inv; mqtt.publish(T_OUTLIMIT_SET, "0"); return; }
+  mqtt.publish(T_OUTLIMIT_SET, p);                       // gueltig -> Original ans Geraet
+}
+void gateForwardInput(const char* p) {                  // LADEN-Antrag (kein SoC-Floor: Laden kann nicht tiefentladen)
+  char* end = nullptr; long v = strtol(p, &end, 10);
+  int inv = 0;
+  if (end == p || *end != '\0') inv = 8;
+  else if (v < 0)               inv = 2;
+  else if (v > (long)DEV_MAX_W) inv = 1;
+  if (inv) { monTripCount++; lastTripInv = inv; mqtt.publish(T_INLIMIT_SET, "0"); return; }
+  mqtt.publish(T_INLIMIT_SET, p);
+}
+void gateForwardAcMode(const char* p) {                 // nur bekannte Modi weiterreichen
+  if (strcmp(p, "Output mode") == 0 || strcmp(p, "Input mode") == 0) mqtt.publish(T_ACMODE_SET, p);
+  else { monTripCount++; lastTripInv = 16; }
 }
 
 void setup() {
@@ -130,8 +172,12 @@ void setup() {
   mqtt.subscribe("#", [](const char* topic, const char* payload) {
     mqtt.msgCount++;
     brokerLastMsgMs = millis();
-    if (strcmp(topic, T_HEARTBEAT) == 0) lastHeartbeatMs = millis();   // Regler lebt -> Enforcer ruht
-    Serial.printf("MQTT  %s = %s\n", topic, payload);
+    if      (strcmp(topic, T_HEARTBEAT) == 0)                   lastHeartbeatMs = millis();  // Regler lebt -> Enforcer ruht
+    else if (strcmp(topic, T_SOC) == 0)                         gateSoc = atol(payload);     // Gate I4 (SoC-Floor)
+    else if (GATE_ENABLE && strcmp(topic, T_CMD_OUTLIMIT) == 0) gateForwardOutput(payload);  // Antrag -> validieren -> Geraet
+    else if (GATE_ENABLE && strcmp(topic, T_CMD_INLIMIT)  == 0) gateForwardInput(payload);
+    else if (GATE_ENABLE && strcmp(topic, T_CMD_ACMODE)   == 0) gateForwardAcMode(payload);
+    // Serial.printf("MQTT  %s = %s\n", topic, payload);   // Debug bei Bedarf (sonst zu viel Traffic)
   });
 
   mqtt.begin();
@@ -157,20 +203,22 @@ void handleHttpStatus() {
 
   long lastMsgAge = (brokerLastMsgMs == 0) ? -1 : (long)((millis() - brokerLastMsgMs) / 1000UL);
   long hbAge      = (lastHeartbeatMs == 0) ? -1 : (long)((millis() - lastHeartbeatMs) / 1000UL);
-  char body[640];
+  char body[768];
   int n = snprintf(body, sizeof(body),
     "{\"fw\":\"%s\",\"build\":\"%s %s\",\"role\":\"mqtt-broker\","
     "\"uptime_s\":%lu,\"boot_count\":%lu,\"reset_reason\":%d,\"free_heap\":%u,\"heap_min\":%u,\"stack_min\":%u,"
     "\"eth_up\":%s,\"ip\":\"%s\",\"mac\":\"%s\",\"eth_down_count\":%lu,"
     "\"clients_connected\":%d,\"max_clients\":%d,\"msg_count\":%llu,\"last_msg_age_s\":%ld,"
-    "\"heartbeat_age_s\":%ld,\"enforcer_active\":%s,\"enforce_count\":%lu}",
+    "\"heartbeat_age_s\":%ld,\"enforcer_active\":%s,\"enforce_count\":%lu,"
+    "\"gate_enabled\":%s,\"monitor_trip_count\":%lu,\"gate_soc\":%ld,\"last_trip_inv\":%d}",
     FW_VERSION, __DATE__, __TIME__,
     (unsigned long)(esp_timer_get_time() / 1000000LL), (unsigned long)bootCount,
     (int)esp_reset_reason(), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
     (unsigned)uxTaskGetStackHighWaterMark(NULL),
     eth_up ? "true" : "false", ETH.localIP().toString().c_str(), ETH.macAddress().c_str(), (unsigned long)ethDownCount,
     mqtt.clients, mqtt.maxClients, (unsigned long long)mqtt.msgCount, lastMsgAge,
-    hbAge, enforcerActive ? "true" : "false", (unsigned long)enforceCount);
+    hbAge, enforcerActive ? "true" : "false", (unsigned long)enforceCount,
+    GATE_ENABLE ? "true" : "false", (unsigned long)monTripCount, (long)gateSoc, lastTripInv);
   if (n < 0) n = 0; else if (n >= (int)sizeof(body)) n = (int)sizeof(body) - 1;  // Content-Length nie > tatsaechlich gesendet
 
   client.print("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
