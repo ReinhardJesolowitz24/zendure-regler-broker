@@ -86,6 +86,28 @@ Beide bieten eine read-only **`GET /status`**-API (Port 80, JSON) für Diagnose/
 
 **Offen / in Arbeit:** Regler-Feintuning (Filter-Zeitkonstante, Verstärkung), Invarianten-Monitor + externe Alarmierung (L3) als Voraussetzung für *unbeaufsichtigten* Dauerbetrieb.
 
+## Grenzen anpassen (Konfiguration)
+
+Die Werte, die man am ehesten an die eigene Anlage anpasst (Akkugröße, Einspeise-Politik, Reserve) — alle als `const` in **`regler/regler.ino`**, Änderung per **Neu-Flashen** (bewusst compile-zeit-fest, nicht zur Laufzeit verstellbar):
+
+| Konstante | Default | Bedeutung |
+|---|---|---|
+| `TARGET_GRID_W` | −25 | Ziel-Netzleistung [W] (negativ = leichter Bezug; −25 vermeidet Einspeisung sicher) |
+| `ZEN_MAX_W` | 2400 | max. **Entlade**-Leistung [W] (Geräte-Maximum) |
+| `ZEN_CHARGE_MAX_W` | 2400 | max. **Lade**-Leistung [W] |
+| `SOC_STOP_DISCHARGE` | 30 | SoC-**Floor** [%] — darunter kein Entladen (Tiefentlade-Schutz) |
+| `SOC_STOP_CHARGE` | 98 | SoC-**Decke** [%] — darüber kein Laden |
+| `SOC_RESUME_HYST` | 3 | Hysterese [%] (Freigabe erst ab Floor+Hyst bzw. Decke−Hyst) |
+| `DEV_MINSOC` | 30 | zusätzlich an die Zendure gesendeter `minSoc`-Backstop (geräteseitig) |
+
+Der Regel-Kern (`KI_REGLER`, `GRID_FILT_TAU_S`, `SLEW_*`, `RETREAT_RAW_W`) ist **Regelungs-Tuning** — normalerweise nicht anzufassen.
+
+> ⚠️ **Geplant (Gate g):** eine **unabhängige Monitor-Ebene auf dem Broker** mit eigenen absoluten Backstop-Grenzen
+> (`DEV_MAX_W`, `MON_SOC_FLOOR`). Dann gilt die **Bracket-Regel: die Broker-Grenzen müssen die Regler-Grenzen einrahmen**
+> (Broker weiter/absoluter: `DEV_MAX_W ≥ ZEN_MAX_W`, `MON_SOC_FLOOR ≤ SOC_STOP_DISCHARGE`). Wer eine Regler-Grenze
+> *über* die Broker-Grenze hinaus ändert, muss die Broker-Grenze **mit-anpassen** — sonst greift der Monitor im
+> Normalbetrieb (Dauer-Safe-State). SoC-Backstop **nie < 10 %**.
+
 ## Credits / Quellen
 
 Dieses Projekt steht auf der Vorarbeit der Community. **Verwendeter Fremd-Code stammt
