@@ -172,7 +172,7 @@ const uint16_t MON_DISCHARGE_MAX_W = 2400;   // unabhaengig von ZEN_MAX_W
 const uint16_t MON_CHARGE_MAX_W    = 2400;   // unabhaengig von ZEN_CHARGE_MAX_W
 
 // ---- Firmware-Version (fuer /status + Baseline-/Versions-Check) -------------
-#define FW_VERSION  "regler-1.20.0"  // 1.20.0: SANFTER Retreat (proportional RETREAT_GAIN=0.5 + Teil-Filter-Blend statt hart auf 0 -> Zendure drosselt statt zu stoppen, kein 0W-Stottern) + GRID_STALE_MS 5s->10s (kurze Shelly-Aussetzer halten letzten Sollwert). Basis 1.19.0. 1.19.0: MQTT-Reconnect-Haertung - eindeutiger Client-Name je Connect (keine Session-Kollision) + setSocketTimeout(4)/setKeepAlive(10) (Reconnect friert Loop/Heartbeat nicht 15s ein) -> beseitigt ~27s-Heartbeat-Luecken -> keine Enforcer-Fehltrips. Basis 1.18.0 (GATE g). 1.18.0: publishSetpoint stellt ANTRAEGE auf regler/cmd/* (Broker validiert+ist einziger Geraete-Schreiber); interner L1-Monitor. BROKER MUSS mit GATE_ENABLE laufen (zuerst flashen!)
+#define FW_VERSION  "regler-1.21.0"  // 1.21.0: STOERUNG = RUHIG BLEIBEN - bei Grid-/Tele-Staleness Sollwert HALTEN (Integrator einfrieren) statt auf 0, Grenzen (Leistung+SoC) gelten weiter; kein Zendure-Stottern bei Shelly/Zendure-Aussetzern. Basis 1.20.0. 1.20.0: SANFTER Retreat (proportional RETREAT_GAIN=0.5 + Teil-Filter-Blend statt hart auf 0 -> Zendure drosselt statt zu stoppen, kein 0W-Stottern) + GRID_STALE_MS 5s->10s (kurze Shelly-Aussetzer halten letzten Sollwert). Basis 1.19.0. 1.19.0: MQTT-Reconnect-Haertung - eindeutiger Client-Name je Connect (keine Session-Kollision) + setSocketTimeout(4)/setKeepAlive(10) (Reconnect friert Loop/Heartbeat nicht 15s ein) -> beseitigt ~27s-Heartbeat-Luecken -> keine Enforcer-Fehltrips. Basis 1.18.0 (GATE g). 1.18.0: publishSetpoint stellt ANTRAEGE auf regler/cmd/* (Broker validiert+ist einziger Geraete-Schreiber); interner L1-Monitor. BROKER MUSS mit GATE_ENABLE laufen (zuerst flashen!)
 SET_LOOP_TASK_STACK_SIZE(12288);     // loop-Task-Stack auf 12 KB anheben (Default 8192); Arduino-ESP32-Makro
 uint32_t bootCount = 0;              // persistenter Reset-Zaehler (NVS) -> erkennt Resets ueber Neustarts hinweg
 
@@ -312,30 +312,36 @@ long computeSetpoint() {
   // Integrator `ctrlInteg` + Sperr-Flags sind GLOBAL (Diagnose via /status).
   ctrlFehler = 0; ctrlDelta = 0; ctrlSlew = false; ctrlDeadband = false;  // Diagnose-Default (inaktiv)
 
-  // --- 1. Sicherheitsebene: Frische der Daten -> sonst sicherer Zustand (0 W = idle, beide Richtungen aus) ---
-  // 1a) GRID-STALENESS: ohne frische Shelly-Netzdaten NICHT auf alten Daten regeln.
-  ctrlGridStale = (lastShellyMs == 0) || (millis() - lastShellyMs > GRID_STALE_MS);
-  if (ctrlGridStale) { ctrlInteg = 0.0f; return 0; }          // Integrator leeren, idle (bumpless)
+  // --- 1. Sicherheitsebene: WICHTIG sind die GRENZEN (Leistung + SoC), NICHT der momentane Sollwert. ---
+  //   Nulleinspeisung ist eine OPTIMIERUNG, kein Not-Aus. Darum bei kurzen Stoerungen (Shelly/Zendure
+  //   antwortet nicht sofort) RUHIG BLEIBEN (Sollwert halten) statt drastisch auf 0 (Zendure wuerde sonst
+  //   stottern) - die Grenzen unten gelten JEDEN Takt weiter, die Sicherheit bleibt gewahrt.
 
-  // 1b) KONTAKT-STALENESS (Link tot): kein Echo/keine Nachricht mehr vom Geraet -> FULL idle (beide Richtungen).
-  //     lastTele wird auf JEDE Geraetenachricht (inkl. outputLimit/inputLimit-Echo ~alle 2s) aufgefrischt.
-  ctrlTeleStale = (lastTele == 0) || (millis() - lastTele > TELE_TIMEOUT_MS);
-  if (ctrlTeleStale) { ctrlInteg = 0.0f; return 0; }
-
-  // 1b2) SoC NIE empfangen -> Floor UND Decke unbekannt -> FULL idle bis zum 1. echten SoC.
+  // 1a) SoC NIE empfangen -> Floor UND Decke UNBEKANNT -> echter Blind-Fall (i.d.R. nur Boot) -> sicherer Idle.
   if (zSoc < 0 || lastSocMs == 0) { ctrlInteg = 0.0f; return 0; }
 
-  // 1b3) SoC-Wert zu ALT trotz lebendem Link (>10min kein echter SoC) -> misstrauen: nur ENTLADEN sperren
-  //      (Tiefentlade-Schutz). LADEN bleibt erlaubt (kann per Definition nicht tiefentladen). KEIN return.
+  // 1b) SoC-abhaengige GRENZEN (gelten IMMER, auch bei Stoerung). SoC zu ALT (>10min) -> ENTLADEN sperren
+  //     (Tiefentlade-Backstop bei langer Blindheit); LADEN bleibt erlaubt (kann nicht tiefentladen).
   ctrlSocOld = (millis() - lastSocMs > SOC_MAX_AGE_MS);
-
-  // 1c) SoC-abhaengige RICHTUNGS-Sperren (Floor/Decke, je mit Hysterese) -> setzen die Integrator-Grenzen.
   if (zSoc <= SOC_STOP_DISCHARGE)                        ctrlBlocked = true;         // Entlade-Sperre rein
   else if (zSoc >= SOC_STOP_DISCHARGE + SOC_RESUME_HYST) ctrlBlocked = false;        // erst mit Hysterese raus
   if (zSoc >= SOC_STOP_CHARGE)                           ctrlChargeBlocked = true;   // Lade-Sperre rein
   else if (zSoc <= SOC_STOP_CHARGE - SOC_RESUME_HYST)    ctrlChargeBlocked = false;  // erst mit Hysterese raus
   long hiLimit = (ctrlBlocked || ctrlSocOld) ? 0 :  ZEN_MAX_W;         // Entladen: Floor ODER SoC-zu-alt sperrt
   long loLimit = ctrlChargeBlocked           ? 0 : -ZEN_CHARGE_MAX_W;  // max. Laden (negativ)
+
+  // 1c) STOERUNG (Shelly ODER Zendure antwortet nicht sofort): NICHT auf 0 -> Sollwert HALTEN, Integrator
+  //     EINFRIEREN (nicht auf alten/fehlenden Daten weiter-integrieren = kein Windup), aber Grenzen (oben)
+  //     weiter anwenden. Kein Feed-in-Schutz in dieser Phase (kein frisches Rohnetz) -> unkritisch (nur
+  //     Optimierung, nicht sicherheitsrelevant), korrigiert sich sofort mit frischen Daten; lange Blindheit
+  //     deckt ctrlSocOld (Entlade-Sperre) ab. lastShellyMs/lastTele==0 (Boot) -> haelt ctrlInteg=0 = Idle.
+  ctrlGridStale = (lastShellyMs == 0) || (millis() - lastShellyMs > GRID_STALE_MS);
+  ctrlTeleStale = (lastTele == 0)     || (millis() - lastTele    > TELE_TIMEOUT_MS);
+  if (ctrlGridStale || ctrlTeleStale) {
+    if (ctrlInteg > (float)hiLimit) ctrlInteg = (float)hiLimit;   // Grenzen bleiben scharf
+    if (ctrlInteg < (float)loLimit) ctrlInteg = (float)loLimit;
+    return (long)(ctrlInteg >= 0.0f ? ctrlInteg + 0.5f : ctrlInteg - 0.5f);   // letzten (geklemmten) Sollwert HALTEN
+  }
 
   // --- 2. Regelabweichung auf dem GEFILTERTEN Netz (TIEFPASS = "Ruhe") ---
   //   Bezug -> fehler>0 -> integ steigt -> ENTLADEN.  Einspeisung -> fehler<0 -> integ faellt -> LADEN.
