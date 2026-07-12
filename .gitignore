@@ -1,6 +1,8 @@
 # Secrets -- niemals echte Zugangsdaten/IPs committen!
 arduino_secrets.h
 **/arduino_secrets.h
+l3_config.ps1
+**/l3_config.ps1
 
 # Arduino / Build-Artefakte
 build/
