@@ -54,7 +54,7 @@
 #define PIN_ETH_RST    9     // -1 falls nicht verbunden
 
 // ---- Firmware-Version (fuer /status + Baseline-/Versions-Check) -------------
-#define FW_VERSION  "broker-1.11.0"  // 1.11.0: Gate g Increment 2 - OVERRIDE-WATCHDOG: fremde Direkt-Publishes auf Zendure/.../{out,in}Limit/set (Bypass am Gate vorbei) -> sofort Safe(0); loopback-sicher via devPublish/wdCheck; /status bypass_trip_count. Basis 1.10.0 (Gatekeeper)
+#define FW_VERSION  "broker-1.12.0"  // 1.12.0: Enforcer-Margin 10s->15s (Defense-in-Depth ggn. Reconnect-Fehltrips; Root-Fix im Regler 1.19.0). Basis 1.11.0. 1.11.0: Gate g Increment 2 - OVERRIDE-WATCHDOG: fremde Direkt-Publishes auf Zendure/.../{out,in}Limit/set -> sofort Safe(0); loopback-sicher via devPublish/wdCheck; /status bypass_trip_count
 SET_LOOP_TASK_STACK_SIZE(12288);     // loop-Task-Stack auf 12 KB anheben (Default 8192); Arduino-ESP32-Makro
 uint32_t bootCount = 0;              // persistenter Reset-Zaehler (NVS) -> erkennt Resets ueber Neustarts hinweg
 const uint32_t WDT_TIMEOUT_MS = 12000;  // HW-Watchdog: loop-Hang laenger -> Reboot. 12s faengt auch etwas
@@ -101,7 +101,7 @@ const char* T_CMD_INLIMIT  = "regler/cmd/inputLimit";
 const char* T_CMD_ACMODE   = "regler/cmd/acMode";
 const char* T_SOC          = "Zendure/sensor/" ZEN_DEV "/electricLevel";   // fuer I4 (SoC-Floor)
 const bool          ENFORCER_ENABLE     = true;   // MASTER: Enforcer scharf. 2026-07-10 Nachtlauf (L2 fuer unbeaufsichtigt scharfen Regler)
-const unsigned long ENFORCER_TIMEOUT_MS = 10000;  // Heartbeat laenger weg -> Regler gilt als tot
+const unsigned long ENFORCER_TIMEOUT_MS = 15000;  // Heartbeat laenger weg -> Regler gilt als tot. 2026-07-12 10s->15s: Defense-in-Depth, toleriert einen kurzen sauberen Reconnect (~2s Luecke) ohne Fehltrip; bleibt eng genug fuer echten Regler-Tod (Geraet haelt Sollwert, SoC-Floor+Backstops als tiefere Ebene). Root-Fix der langen Luecken sitzt im Regler (1.19.0 Reconnect-Haertung).
 const unsigned long ENFORCER_REPUB_MS   = 1000;   // solange still: out=0 + in=0 alle 1s neu senden
 unsigned long lastHeartbeatMs = 0;                // letzter regler/heartbeat (im subscribe-Callback gesetzt)
 unsigned long lastEnforceMs   = 0;                // letztes Enforcer-Safe-Kommando

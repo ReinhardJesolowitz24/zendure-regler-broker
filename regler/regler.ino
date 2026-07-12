@@ -79,7 +79,7 @@ const unsigned long TELE_TIMEOUT_MS = 15000;   // Fail-Safe: kein KONTAKT zum Ge
                                                //   SoC kommt nur ~alle 2-3min -> stotterte; jetzt auf Echo-Kontakt bezogen.)
 const unsigned long SOC_MAX_AGE_MS  = 600000;  // Fail-Safe: Link lebt (Echo), aber >10min KEIN echter SoC -> SoC misstrauen
                                                //   -> Entladen sperren (Tiefentlade-Schutz); Laden bleibt erlaubt (kann nicht tiefentladen).
-const unsigned long GRID_STALE_MS   = 5000;    // Fail-Safe: Shelly-Netzdaten aelter -> NICHT mehr regeln
+const unsigned long GRID_STALE_MS   = 10000;   // Fail-Safe: Shelly-Netzdaten aelter -> NICHT mehr regeln. 2026-07-12 5s->10s: kurze Shelly-Aussetzer (shelly_fail) NICHT mehr sofort auf Idle-0 (Zendure stotterte) -> letzten Sollwert halten (Zendure haelt ohnehin), erst >10s echter Ausfall -> Safe-0
                                                //   (Retry haelt shelly_age i.d.R. <=1-2s; erst echter Verlust greift)
 const uint32_t      WDT_TIMEOUT_MS  = 12000;   // HW-Watchdog: loop-Hang laenger -> Reboot. 12s = grosser
                                                //   Abstand zum Worst-Case (Shelly 2,5s + /status 1s), faengt
@@ -130,8 +130,12 @@ const long  MODE_HYST_W = 40;         // Mode-Totband (W): |Sollwert| < 40 -> id
 // GEGENRICHTUNGS-ABBRUCH (Feed-in-Schutz, 2026-07-10): schneller Stop auf dem ROHEN Netz. Der fruehere asymm.
 //   "toward-zero fast"-Slew ist ersetzt durch RETREAT_RAW_W (harter Stop) + die richtungs-abhaengige Slew oben.
 const long  RETREAT_RAW_W = 300;      // Feed-in-Schutz auf dem ROHEN Netz: entladen trotz Einspeisung > 300W (oder
-                                      //   laden trotz Bezug > 300W) -> Integrator SOFORT auf 0. Hoch genug, dass kleine
-                                      //   Blinker durchlaufen (PI regelt die gefiltert), aber echter grosser Wegfall sofort stoppt.
+                                      //   laden trotz Bezug > 300W) -> Ruecknahme. Hoch genug, dass kleine Blinker
+                                      //   durchlaufen (PI regelt gefiltert), aber echter grosser Wegfall reagiert schnell.
+// SANFTER Retreat (2026-07-12): FRUEHER hart Integrator=0 (return 0) -> Zendure STOPPTE bei jedem Roh-Blip und
+//   brauchte ~30-40s Wiederanlauf -> sichtbares "immer wieder auf 0W"-Stottern. JETZT proportional:
+const float RETREAT_GAIN       = 0.5f;   // nimm diesen Anteil des Roh-Ueberschusses raus (0=aus..1=voll). Klein=sanft.
+const float RETREAT_FILT_BLEND = 0.5f;   // Filter-Nachzug beim Retreat (0=gar nicht..1=harter Reset auf Roh). Halb=weniger Nachdrall bei Blips.
 // NETZ-TIEFPASS (2026-07-11, aus Nachtlauf: Abend-Std 700-900W durch Jagen taktender Lasten -> Loecher treffen).
 //   EMA auf gridPowerW -> Regler+Retreat regeln den MITTELWERT ("Ruhe"). tau > Aktuator-Totzeit (~10s), damit
 //   Sekunden-Blinker ausgemittelt werden, echte (langsame) Laststufen aber noch durchkommen. Poll ~1s.
@@ -168,7 +172,7 @@ const uint16_t MON_DISCHARGE_MAX_W = 2400;   // unabhaengig von ZEN_MAX_W
 const uint16_t MON_CHARGE_MAX_W    = 2400;   // unabhaengig von ZEN_CHARGE_MAX_W
 
 // ---- Firmware-Version (fuer /status + Baseline-/Versions-Check) -------------
-#define FW_VERSION  "regler-1.18.0"  // 1.18.0: GATE g - publishSetpoint stellt ANTRAEGE auf regler/cmd/* (Broker validiert+ist einziger Geraete-Schreiber); interner L1-Monitor (Endwert vs MON_*_MAX). BROKER MUSS mit GATE_ENABLE laufen (zuerst flashen!). Basis 1.17.0
+#define FW_VERSION  "regler-1.20.0"  // 1.20.0: SANFTER Retreat (proportional RETREAT_GAIN=0.5 + Teil-Filter-Blend statt hart auf 0 -> Zendure drosselt statt zu stoppen, kein 0W-Stottern) + GRID_STALE_MS 5s->10s (kurze Shelly-Aussetzer halten letzten Sollwert). Basis 1.19.0. 1.19.0: MQTT-Reconnect-Haertung - eindeutiger Client-Name je Connect (keine Session-Kollision) + setSocketTimeout(4)/setKeepAlive(10) (Reconnect friert Loop/Heartbeat nicht 15s ein) -> beseitigt ~27s-Heartbeat-Luecken -> keine Enforcer-Fehltrips. Basis 1.18.0 (GATE g). 1.18.0: publishSetpoint stellt ANTRAEGE auf regler/cmd/* (Broker validiert+ist einziger Geraete-Schreiber); interner L1-Monitor. BROKER MUSS mit GATE_ENABLE laufen (zuerst flashen!)
 SET_LOOP_TASK_STACK_SIZE(12288);     // loop-Task-Stack auf 12 KB anheben (Default 8192); Arduino-ESP32-Makro
 uint32_t bootCount = 0;              // persistenter Reset-Zaehler (NVS) -> erkennt Resets ueber Neustarts hinweg
 
@@ -276,7 +280,13 @@ void onMqtt(char* topic, byte* payload, unsigned int len) {
 
 bool mqttReconnect() {
   if (mqtt.connected()) return true;
-  if (mqtt.connect("zendure-regler")) {
+  // EINDEUTIGER Client-Name je Verbindungsversuch: verhindert Kollision mit einer noch
+  // nicht abgeraeumten alten Session gleichen Namens am Broker (sonst ~keepalive-lange
+  // Reconnect-Luecke -> Heartbeat weg -> Enforcer-Fehltrip). PicoMQTT haelt eine dyn.
+  // Client-Liste (kein festes Limit); alte Session raeumt via Keepalive selbst ab.
+  char cid[40];
+  snprintf(cid, sizeof(cid), "zendure-regler-%lu", (unsigned long)millis());
+  if (mqtt.connect(cid)) {
     mqtt.subscribe(T_SOC);
     mqtt.subscribe(T_OUTHOME);
     mqtt.subscribe(T_OUTLIMIT_ST);                // Device-Echo -> schnelles Liveness-Signal (~2s)
@@ -341,12 +351,22 @@ long computeSetpoint() {
   //   spaet -> -3335W eingespeist). Daher HIER das ROHE gridPowerW mit HOHER Schwelle RETREAT_RAW_W:
   //   kleine Blinker (<Schwelle) ignoriert (kein Saegezahn), ECHTER grosser Wegfall SOFORT gestoppt.
   //     entladen (integ>0) trotz Einspeisung > RETREAT_RAW_W  ODER  laden (integ<0) trotz Bezug > RETREAT_RAW_W
-  //   -> Integrator SOFORT auf 0 -> publishSetpoint sendet Idle + Stop-Burst. "fail toward safe fast".
-  //   ZUSATZ (2026-07-11): dabei den TIEFPASS auf das rohe Netz RESETTEN (gridPowerFilt = gridPowerW). Feuert
-  //   der Retreat, ist der gefilterte Wert nachweislich veraltet (grosser Regimewechsel) -> ohne Reset wuerde
-  //   der PI ~tau lang die alte Richtung wollen und gegen den Retreat flattern (Nachdrall nach grossem Wegfall).
+  //   -> SANFT proportional zurueck (RETREAT_GAIN * Roh-Ueberschuss) statt hart auf 0. Kleiner Blip -> winzige
+  //   Ruecknahme (Zendure DROSSELT statt zu STOPPEN -> kein ~30-40s Wiederanlauf, kein Stottern); echter grosser
+  //   Wegfall -> grosse Ruecknahme (feed-in bleibt schnell begrenzt). NICHT ueber 0 (keine Richtungsumkehr per
+  //   Retreat -> Relais-Schonung). Filter nur TEIL-nachziehen (RETREAT_FILT_BLEND) statt harter Reset -> weniger
+  //   PI-Nachdrall bei transienten Blips, aber genug Anti-Flatter bei echtem Wegfall. Dieser Zyklus per return.
   if ((ctrlInteg > 0.0f && gridPowerW >  RETREAT_RAW_W) ||
-      (ctrlInteg < 0.0f && gridPowerW < -RETREAT_RAW_W)) { ctrlInteg = 0.0f; gridPowerFilt = (float)gridPowerW; cntRetreat++; return 0; }
+      (ctrlInteg < 0.0f && gridPowerW < -RETREAT_RAW_W)) {
+    ctrlInteg -= RETREAT_GAIN * (float)gridPowerW;
+    if (ctrlInteg < 0.0f && gridPowerW > 0) ctrlInteg = 0.0f;   // war Entladen -> nicht ins Laden kippen
+    if (ctrlInteg > 0.0f && gridPowerW < 0) ctrlInteg = 0.0f;   // war Laden  -> nicht ins Entladen kippen
+    gridPowerFilt += RETREAT_FILT_BLEND * ((float)gridPowerW - gridPowerFilt);
+    cntRetreat++;
+    if (ctrlInteg > (float)hiLimit) ctrlInteg = (float)hiLimit;
+    if (ctrlInteg < (float)loLimit) ctrlInteg = (float)loLimit;
+    return (long)(ctrlInteg >= 0.0f ? ctrlInteg + 0.5f : ctrlInteg - 0.5f);
+  }
 
   ctrlDeadband = (fehler > -DEADBAND_W && fehler < DEADBAND_W);
   if (ctrlDeadband) fehler = 0;                                 // Totband -> kein Jagen auf Rauschen
@@ -488,6 +508,13 @@ void setup() {
   mqtt.setServer(bip, BROKER_PORT);
   mqtt.setCallback(onMqtt);
   mqtt.setBufferSize(512);
+  // Reconnect darf den Loop (Heartbeat!) nicht lange einfrieren: PubSubClient-Default
+  // MQTT_SOCKET_TIMEOUT=15s wuerde bei ausbleibendem CONNACK ~15s pro Versuch blockieren
+  // (2 zaehe Versuche ~ die beobachtete 27s-Heartbeat-Luecke). 4s -> Versuch scheitert
+  // schnell, Loop bedient mqtt.loop()+Heartbeat weiter. Keepalive 10s -> tote Session
+  // raeumt der Broker frueher ab (schnellerer sauberer Reconnect).
+  mqtt.setSocketTimeout(4);
+  mqtt.setKeepAlive(10);
   httpServer.begin();
 
   // Hardware-Watchdog ERST JETZT scharf (nach Netz-Setup). Core 3.x hat TWDT bereits init -> reconfigure.
