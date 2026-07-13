@@ -172,7 +172,7 @@ const uint16_t MON_DISCHARGE_MAX_W = 2400;   // unabhaengig von ZEN_MAX_W
 const uint16_t MON_CHARGE_MAX_W    = 2400;   // unabhaengig von ZEN_CHARGE_MAX_W
 
 // ---- Firmware-Version (fuer /status + Baseline-/Versions-Check) -------------
-#define FW_VERSION  "regler-1.21.0"  // 1.21.0: STOERUNG = RUHIG BLEIBEN - bei Grid-/Tele-Staleness Sollwert HALTEN (Integrator einfrieren) statt auf 0, Grenzen (Leistung+SoC) gelten weiter; kein Zendure-Stottern bei Shelly/Zendure-Aussetzern. Basis 1.20.0. 1.20.0: SANFTER Retreat (proportional RETREAT_GAIN=0.5 + Teil-Filter-Blend statt hart auf 0 -> Zendure drosselt statt zu stoppen, kein 0W-Stottern) + GRID_STALE_MS 5s->10s (kurze Shelly-Aussetzer halten letzten Sollwert). Basis 1.19.0. 1.19.0: MQTT-Reconnect-Haertung - eindeutiger Client-Name je Connect (keine Session-Kollision) + setSocketTimeout(4)/setKeepAlive(10) (Reconnect friert Loop/Heartbeat nicht 15s ein) -> beseitigt ~27s-Heartbeat-Luecken -> keine Enforcer-Fehltrips. Basis 1.18.0 (GATE g). 1.18.0: publishSetpoint stellt ANTRAEGE auf regler/cmd/* (Broker validiert+ist einziger Geraete-Schreiber); interner L1-Monitor. BROKER MUSS mit GATE_ENABLE laufen (zuerst flashen!)
+#define FW_VERSION  "regler-1.22.0"  // 1.22.0: /status-Handler gehaertet - kein blockierendes client.flush() mehr (frueh-schliessende Waechter-controlAlive-Clients konnten den Loop >12s blocken -> TASK_WDT). Basis 1.21.0. 1.21.0: STOERUNG = RUHIG BLEIBEN - bei Grid-/Tele-Staleness Sollwert HALTEN (Integrator einfrieren) statt auf 0, Grenzen (Leistung+SoC) gelten weiter; kein Zendure-Stottern bei Shelly/Zendure-Aussetzern. Basis 1.20.0. 1.20.0: SANFTER Retreat (proportional RETREAT_GAIN=0.5 + Teil-Filter-Blend statt hart auf 0 -> Zendure drosselt statt zu stoppen, kein 0W-Stottern) + GRID_STALE_MS 5s->10s (kurze Shelly-Aussetzer halten letzten Sollwert). Basis 1.19.0. 1.19.0: MQTT-Reconnect-Haertung - eindeutiger Client-Name je Connect (keine Session-Kollision) + setSocketTimeout(4)/setKeepAlive(10) (Reconnect friert Loop/Heartbeat nicht 15s ein) -> beseitigt ~27s-Heartbeat-Luecken -> keine Enforcer-Fehltrips. Basis 1.18.0 (GATE g). 1.18.0: publishSetpoint stellt ANTRAEGE auf regler/cmd/* (Broker validiert+ist einziger Geraete-Schreiber); interner L1-Monitor. BROKER MUSS mit GATE_ENABLE laufen (zuerst flashen!)
 SET_LOOP_TASK_STACK_SIZE(12288);     // loop-Task-Stack auf 12 KB anheben (Default 8192); Arduino-ESP32-Makro
 uint32_t bootCount = 0;              // persistenter Reset-Zaehler (NVS) -> erkennt Resets ueber Neustarts hinweg
 
@@ -491,11 +491,17 @@ void handleHttpStatus() {
     (unsigned long)cntPub, (unsigned long long)cntTele, (unsigned long)cntShellyFail, (unsigned long)cntShellyRetry, (unsigned long)cntMqttReconn, (unsigned long)cntRetreat, (unsigned long)cntMonTrip);
   if (n < 0) n = 0; else if (n >= (int)sizeof(body)) n = (int)sizeof(body) - 1;  // Content-Length nie > tatsaechlich gesendet
 
-  client.print("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-               "Access-Control-Allow-Origin: *\r\nConnection: close\r\n");
-  client.printf("Content-Length: %d\r\n\r\n", n);
-  client.print(body);
-  client.flush();
+  // HAERTUNG (2026-07-13, TASK_WDT-Fix): frueh-schliessende Clients (Waechter-controlAlive liest nur
+  // die Statuszeile + client.stop()) duerfen den Loop NICHT blockieren. KEIN client.flush() mehr --
+  // das wartete auf ACKs eines evtl. weggebrochenen Peers -> TCP-Retransmit-Backoff >12s -> TASK_WDT.
+  // Nur schreiben wenn noch verbunden; stop() liefert die gepufferten Daten via "Connection: close"
+  // ohnehin aus. Antwort ist klein (<1 KB, 1 Segment) -> die Writes selbst blockieren nicht.
+  if (client.connected()) {
+    client.print("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                 "Access-Control-Allow-Origin: *\r\nConnection: close\r\n");
+    client.printf("Content-Length: %d\r\n\r\n", n);
+    client.print(body);
+  }
   delay(5);
   client.stop();
 }

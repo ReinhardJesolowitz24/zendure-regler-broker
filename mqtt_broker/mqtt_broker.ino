@@ -54,7 +54,7 @@
 #define PIN_ETH_RST    9     // -1 falls nicht verbunden
 
 // ---- Firmware-Version (fuer /status + Baseline-/Versions-Check) -------------
-#define FW_VERSION  "broker-1.12.0"  // 1.12.0: Enforcer-Margin 10s->15s (Defense-in-Depth ggn. Reconnect-Fehltrips; Root-Fix im Regler 1.19.0). Basis 1.11.0. 1.11.0: Gate g Increment 2 - OVERRIDE-WATCHDOG: fremde Direkt-Publishes auf Zendure/.../{out,in}Limit/set -> sofort Safe(0); loopback-sicher via devPublish/wdCheck; /status bypass_trip_count
+#define FW_VERSION  "broker-1.13.0"  // 1.13.0: /status-Handler gehaertet - kein blockierendes client.flush() mehr (frueh-schliessende Waechter-controlAlive-Clients konnten den Loop >12s blocken -> TASK_WDT). Basis 1.12.0. 1.12.0: Enforcer-Margin 10s->15s (Defense-in-Depth ggn. Reconnect-Fehltrips; Root-Fix im Regler 1.19.0). Basis 1.11.0. 1.11.0: Gate g Increment 2 - OVERRIDE-WATCHDOG: fremde Direkt-Publishes auf Zendure/.../{out,in}Limit/set -> sofort Safe(0); loopback-sicher via devPublish/wdCheck; /status bypass_trip_count
 SET_LOOP_TASK_STACK_SIZE(12288);     // loop-Task-Stack auf 12 KB anheben (Default 8192); Arduino-ESP32-Makro
 uint32_t bootCount = 0;              // persistenter Reset-Zaehler (NVS) -> erkennt Resets ueber Neustarts hinweg
 const uint32_t WDT_TIMEOUT_MS = 12000;  // HW-Watchdog: loop-Hang laenger -> Reboot. 12s faengt auch etwas
@@ -251,11 +251,17 @@ void handleHttpStatus() {
     GATE_ENABLE ? "true" : "false", (unsigned long)monTripCount, (long)gateSoc, lastTripInv, (unsigned long)bypassTripCount);
   if (n < 0) n = 0; else if (n >= (int)sizeof(body)) n = (int)sizeof(body) - 1;  // Content-Length nie > tatsaechlich gesendet
 
-  client.print("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-               "Access-Control-Allow-Origin: *\r\nConnection: close\r\n");
-  client.printf("Content-Length: %d\r\n\r\n", n);
-  client.print(body);
-  client.flush();
+  // HAERTUNG (2026-07-13, TASK_WDT-Fix): frueh-schliessende Clients (Waechter-controlAlive liest nur
+  // die Statuszeile + client.stop()) duerfen den Loop NICHT blockieren. KEIN client.flush() mehr --
+  // das wartete auf ACKs eines evtl. weggebrochenen Peers -> TCP-Retransmit-Backoff >12s -> TASK_WDT.
+  // Nur schreiben wenn noch verbunden; stop() liefert die gepufferten Daten via "Connection: close"
+  // ohnehin aus. Antwort ist klein (<1 KB, 1 Segment) -> die Writes selbst blockieren nicht.
+  if (client.connected()) {
+    client.print("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                 "Access-Control-Allow-Origin: *\r\nConnection: close\r\n");
+    client.printf("Content-Length: %d\r\n\r\n", n);
+    client.print(body);
+  }
   delay(5);
   client.stop();
 }
