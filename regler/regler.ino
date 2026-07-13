@@ -81,6 +81,7 @@ const unsigned long SOC_MAX_AGE_MS  = 600000;  // Fail-Safe: Link lebt (Echo), a
                                                //   -> Entladen sperren (Tiefentlade-Schutz); Laden bleibt erlaubt (kann nicht tiefentladen).
 const unsigned long GRID_STALE_MS   = 10000;   // Fail-Safe: Shelly-Netzdaten aelter -> NICHT mehr regeln. 2026-07-12 5s->10s: kurze Shelly-Aussetzer (shelly_fail) NICHT mehr sofort auf Idle-0 (Zendure stotterte) -> letzten Sollwert halten (Zendure haelt ohnehin), erst >10s echter Ausfall -> Safe-0
                                                //   (Retry haelt shelly_age i.d.R. <=1-2s; erst echter Verlust greift)
+const unsigned long GRID_BLIND_MAX_MS = 750000UL; // F1 (2026-07-13): Shelly SO lang blind (12,5 min) -> Sollwert nicht ewig halten, sondern slew-sanft auf idle abbauen. Deckelt Fehlerfall-Energie ~0,5 kWh (12,5min x 2400W). ctrlSocOld deckt nur Tele-Stale (Zendure), NICHT Shelly-Ausfall.
 const uint32_t      WDT_TIMEOUT_MS  = 12000;   // HW-Watchdog: loop-Hang laenger -> Reboot. 12s = grosser
                                                //   Abstand zum Worst-Case (Shelly 2,5s + /status 1s), faengt
                                                //   auch etwas laengere Stoerungen ab; reset_reason wird TASK_WDT
@@ -172,7 +173,7 @@ const uint16_t MON_DISCHARGE_MAX_W = 2400;   // unabhaengig von ZEN_MAX_W
 const uint16_t MON_CHARGE_MAX_W    = 2400;   // unabhaengig von ZEN_CHARGE_MAX_W
 
 // ---- Firmware-Version (fuer /status + Baseline-/Versions-Check) -------------
-#define FW_VERSION  "regler-1.22.0"  // 1.22.0: /status-Handler gehaertet - kein blockierendes client.flush() mehr (frueh-schliessende Waechter-controlAlive-Clients konnten den Loop >12s blocken -> TASK_WDT). Basis 1.21.0. 1.21.0: STOERUNG = RUHIG BLEIBEN - bei Grid-/Tele-Staleness Sollwert HALTEN (Integrator einfrieren) statt auf 0, Grenzen (Leistung+SoC) gelten weiter; kein Zendure-Stottern bei Shelly/Zendure-Aussetzern. Basis 1.20.0. 1.20.0: SANFTER Retreat (proportional RETREAT_GAIN=0.5 + Teil-Filter-Blend statt hart auf 0 -> Zendure drosselt statt zu stoppen, kein 0W-Stottern) + GRID_STALE_MS 5s->10s (kurze Shelly-Aussetzer halten letzten Sollwert). Basis 1.19.0. 1.19.0: MQTT-Reconnect-Haertung - eindeutiger Client-Name je Connect (keine Session-Kollision) + setSocketTimeout(4)/setKeepAlive(10) (Reconnect friert Loop/Heartbeat nicht 15s ein) -> beseitigt ~27s-Heartbeat-Luecken -> keine Enforcer-Fehltrips. Basis 1.18.0 (GATE g). 1.18.0: publishSetpoint stellt ANTRAEGE auf regler/cmd/* (Broker validiert+ist einziger Geraete-Schreiber); interner L1-Monitor. BROKER MUSS mit GATE_ENABLE laufen (zuerst flashen!)
+#define FW_VERSION  "regler-1.23.0"  // 1.23.0 (Design-Review-Fixes): F1 Grid-Blind-Eskalation (Shelly >12,5min blind -> Sollwert slew-sanft auf idle, deckelt Fehlerfall-Energie ~0,5kWh; ctrlSocOld deckt nur Zendure-Tele nicht Shelly); F3 /status-Parse hart zeitbegrenzt (Slow-Client kann keinen TASK_WDT ausloesen); F4 readShelly-Timeout 1000->300ms (~700ms/Poll gespart). Basis 1.22.0. 1.22.0: /status-Handler gehaertet - kein blockierendes client.flush() mehr (frueh-schliessende Waechter-controlAlive-Clients konnten den Loop >12s blocken -> TASK_WDT). Basis 1.21.0. 1.21.0: STOERUNG = RUHIG BLEIBEN - bei Grid-/Tele-Staleness Sollwert HALTEN (Integrator einfrieren) statt auf 0, Grenzen (Leistung+SoC) gelten weiter; kein Zendure-Stottern bei Shelly/Zendure-Aussetzern. Basis 1.20.0. 1.20.0: SANFTER Retreat (proportional RETREAT_GAIN=0.5 + Teil-Filter-Blend statt hart auf 0 -> Zendure drosselt statt zu stoppen, kein 0W-Stottern) + GRID_STALE_MS 5s->10s (kurze Shelly-Aussetzer halten letzten Sollwert). Basis 1.19.0. 1.19.0: MQTT-Reconnect-Haertung - eindeutiger Client-Name je Connect (keine Session-Kollision) + setSocketTimeout(4)/setKeepAlive(10) (Reconnect friert Loop/Heartbeat nicht 15s ein) -> beseitigt ~27s-Heartbeat-Luecken -> keine Enforcer-Fehltrips. Basis 1.18.0 (GATE g). 1.18.0: publishSetpoint stellt ANTRAEGE auf regler/cmd/* (Broker validiert+ist einziger Geraete-Schreiber); interner L1-Monitor. BROKER MUSS mit GATE_ENABLE laufen (zuerst flashen!)
 SET_LOOP_TASK_STACK_SIZE(12288);     // loop-Task-Stack auf 12 KB anheben (Default 8192); Arduino-ESP32-Makro
 uint32_t bootCount = 0;              // persistenter Reset-Zaehler (NVS) -> erkennt Resets ueber Neustarts hinweg
 
@@ -220,7 +221,7 @@ void ethSetup() {
 // Shelly per HTTP lesen -> total_act_power. EIN Versuch (Connect/Read/Parse), kurzer Connect-Timeout.
 bool readShellyOnce() {
   if (!httpClient.connect(SECRET_SHELLY_HOST, SHELLY_PORT, SHELLY_CONNECT_MS)) return false;
-  httpClient.setTimeout(1000);   // ms - Inter-Byte-Timeout fuer readString()/readStringUntil()
+  httpClient.setTimeout(300);    // ms - Inter-Byte-Timeout. F4 (2026-07-13): war 1000 -> readString() wartete nach jedem Poll die volle Sekunde nach dem letzten Byte ab (~1s Loop-Blockade/Poll). Body kommt lokal im Burst -> 300ms reicht, spart ~700ms/Poll (fluessigerer Loop -> weniger MQTT-Drops). Fehlversuch bei zu straffem Wert unkritisch (shelly_fail, Retry)
   httpClient.print(String("GET ") + SHELLY_PATH + " HTTP/1.1\r\nHost: " + SECRET_SHELLY_HOST + "\r\nConnection: close\r\n\r\n");
   unsigned long t0 = millis();
   while (httpClient.connected() && !httpClient.available()) {
@@ -332,15 +333,24 @@ long computeSetpoint() {
 
   // 1c) STOERUNG (Shelly ODER Zendure antwortet nicht sofort): NICHT auf 0 -> Sollwert HALTEN, Integrator
   //     EINFRIEREN (nicht auf alten/fehlenden Daten weiter-integrieren = kein Windup), aber Grenzen (oben)
-  //     weiter anwenden. Kein Feed-in-Schutz in dieser Phase (kein frisches Rohnetz) -> unkritisch (nur
-  //     Optimierung, nicht sicherheitsrelevant), korrigiert sich sofort mit frischen Daten; lange Blindheit
-  //     deckt ctrlSocOld (Entlade-Sperre) ab. lastShellyMs/lastTele==0 (Boot) -> haelt ctrlInteg=0 = Idle.
+  //     weiter anwenden. Kurze Stoerung korrigiert sich sofort mit frischen Daten. Boot (lastShellyMs/
+  //     lastTele==0) -> haelt ctrlInteg=0 = Idle.
+  //   F1-ESKALATION (2026-07-13): Haelt der SHELLY (Netz) LANG aus (>GRID_BLIND_MAX_MS), greift die
+  //     ctrlSocOld-Sperre NICHT (die haengt an der Zendure-Tele, nicht am Shelly) -> ohne Limit wuerde blind
+  //     stundenlang ent-/geladen (unerwuenschte Dauereinspeisung moeglich). Darum nach GRID_BLIND_MAX_MS den
+  //     Sollwert SLEW-SANFT auf idle abbauen (kein Sprung/Stotter). Energie-Budget im Fehlerfall ~ 0,5 kWh
+  //     (12,5 min x 2400 W). Tele-Stale-Fall bleibt durch ctrlSocOld gedeckt.
   ctrlGridStale = (lastShellyMs == 0) || (millis() - lastShellyMs > GRID_STALE_MS);
   ctrlTeleStale = (lastTele == 0)     || (millis() - lastTele    > TELE_TIMEOUT_MS);
   if (ctrlGridStale || ctrlTeleStale) {
+    if (lastShellyMs != 0 && (millis() - lastShellyMs > GRID_BLIND_MAX_MS)) {   // Shelly lang blind -> geordnet Richtung idle abbauen
+      if      (ctrlInteg >  (float)SLEW_SAME_W) ctrlInteg -= (float)SLEW_SAME_W;
+      else if (ctrlInteg < -(float)SLEW_SAME_W) ctrlInteg += (float)SLEW_SAME_W;
+      else ctrlInteg = 0.0f;
+    }
     if (ctrlInteg > (float)hiLimit) ctrlInteg = (float)hiLimit;   // Grenzen bleiben scharf
     if (ctrlInteg < (float)loLimit) ctrlInteg = (float)loLimit;
-    return (long)(ctrlInteg >= 0.0f ? ctrlInteg + 0.5f : ctrlInteg - 0.5f);   // letzten (geklemmten) Sollwert HALTEN
+    return (long)(ctrlInteg >= 0.0f ? ctrlInteg + 0.5f : ctrlInteg - 0.5f);   // letzten (geklemmten) Sollwert HALTEN / abbauen
   }
 
   // --- 2. Regelabweichung auf dem GEFILTERTEN Netz (TIEFPASS = "Ruhe") ---
@@ -461,10 +471,11 @@ void failSafeCheck() {
 void handleHttpStatus() {
   WiFiClient client = httpServer.available();
   if (!client) return;
+  client.setTimeout(200);                                         // F3 (2026-07-13): Lese-Timeout eng -> troepfelnder Slow-Client kann den Parse nicht bis zum WDT (12s) halten
   unsigned long t0 = millis();
-  while (!client.available() && millis() - t0 < 1000) delay(1);
+  while (!client.available() && millis() - t0 < 800) delay(1);
   client.readStringUntil('\n');                                   // Request-Zeile (nur GET /status)
-  while (client.available()) { String h = client.readStringUntil('\n'); if (h.length() <= 1) break; }  // Header weg
+  while (client.available() && millis() - t0 < 1500) { String h = client.readStringUntil('\n'); if (h.length() <= 1) break; }  // Header weg, HART zeitbegrenzt (WDT-Schutz)
 
   long teleAge   = (lastTele == 0)    ? -1 : (long)((millis() - lastTele) / 1000UL);
   long socAge    = (lastSocMs == 0)   ? -1 : (long)((millis() - lastSocMs) / 1000UL);

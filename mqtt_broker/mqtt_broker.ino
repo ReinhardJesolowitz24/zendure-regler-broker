@@ -54,7 +54,7 @@
 #define PIN_ETH_RST    9     // -1 falls nicht verbunden
 
 // ---- Firmware-Version (fuer /status + Baseline-/Versions-Check) -------------
-#define FW_VERSION  "broker-1.13.0"  // 1.13.0: /status-Handler gehaertet - kein blockierendes client.flush() mehr (frueh-schliessende Waechter-controlAlive-Clients konnten den Loop >12s blocken -> TASK_WDT). Basis 1.12.0. 1.12.0: Enforcer-Margin 10s->15s (Defense-in-Depth ggn. Reconnect-Fehltrips; Root-Fix im Regler 1.19.0). Basis 1.11.0. 1.11.0: Gate g Increment 2 - OVERRIDE-WATCHDOG: fremde Direkt-Publishes auf Zendure/.../{out,in}Limit/set -> sofort Safe(0); loopback-sicher via devPublish/wdCheck; /status bypass_trip_count
+#define FW_VERSION  "broker-1.14.0"  // 1.14.0 (Design-Review F3): /status-Parse hart zeitbegrenzt (setTimeout(200)+1,5s-Deadline) -> troepfelnder Slow-Client kann keinen TASK_WDT-Reboot ausloesen. Basis 1.13.0. 1.13.0: /status-Handler gehaertet - kein blockierendes client.flush() mehr (frueh-schliessende Waechter-controlAlive-Clients konnten den Loop >12s blocken -> TASK_WDT). Basis 1.12.0. 1.12.0: Enforcer-Margin 10s->15s (Defense-in-Depth ggn. Reconnect-Fehltrips; Root-Fix im Regler 1.19.0). Basis 1.11.0. 1.11.0: Gate g Increment 2 - OVERRIDE-WATCHDOG: fremde Direkt-Publishes auf Zendure/.../{out,in}Limit/set -> sofort Safe(0); loopback-sicher via devPublish/wdCheck; /status bypass_trip_count
 SET_LOOP_TASK_STACK_SIZE(12288);     // loop-Task-Stack auf 12 KB anheben (Default 8192); Arduino-ESP32-Makro
 uint32_t bootCount = 0;              // persistenter Reset-Zaehler (NVS) -> erkennt Resets ueber Neustarts hinweg
 const uint32_t WDT_TIMEOUT_MS = 12000;  // HW-Watchdog: loop-Hang laenger -> Reboot. 12s faengt auch etwas
@@ -226,10 +226,11 @@ void setup() {
 void handleHttpStatus() {
   WiFiClient client = httpServer.available();
   if (!client) return;
+  client.setTimeout(200);                                         // F3 (2026-07-13): Lese-Timeout eng -> troepfelnder Slow-Client kann den Parse nicht bis zum WDT (12s) halten
   unsigned long t0 = millis();
-  while (!client.available() && millis() - t0 < 1000) delay(1);
+  while (!client.available() && millis() - t0 < 800) delay(1);
   client.readStringUntil('\n');                                   // Request-Zeile (nur GET /status)
-  while (client.available()) { String h = client.readStringUntil('\n'); if (h.length() <= 1) break; }  // Header weg
+  while (client.available() && millis() - t0 < 1500) { String h = client.readStringUntil('\n'); if (h.length() <= 1) break; }  // Header weg, HART zeitbegrenzt (WDT-Schutz)
 
   long lastMsgAge = (brokerLastMsgMs == 0) ? -1 : (long)((millis() - brokerLastMsgMs) / 1000UL);
   long hbAge      = (lastHeartbeatMs == 0) ? -1 : (long)((millis() - lastHeartbeatMs) / 1000UL);
