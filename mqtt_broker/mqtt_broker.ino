@@ -54,7 +54,7 @@
 #define PIN_ETH_RST    9     // -1 falls nicht verbunden
 
 // ---- Firmware-Version (fuer /status + Baseline-/Versions-Check) -------------
-#define FW_VERSION  "broker-1.14.0"  // 1.14.0 (Design-Review F3): /status-Parse hart zeitbegrenzt (setTimeout(200)+1,5s-Deadline) -> troepfelnder Slow-Client kann keinen TASK_WDT-Reboot ausloesen. Basis 1.13.0. 1.13.0: /status-Handler gehaertet - kein blockierendes client.flush() mehr (frueh-schliessende Waechter-controlAlive-Clients konnten den Loop >12s blocken -> TASK_WDT). Basis 1.12.0. 1.12.0: Enforcer-Margin 10s->15s (Defense-in-Depth ggn. Reconnect-Fehltrips; Root-Fix im Regler 1.19.0). Basis 1.11.0. 1.11.0: Gate g Increment 2 - OVERRIDE-WATCHDOG: fremde Direkt-Publishes auf Zendure/.../{out,in}Limit/set -> sofort Safe(0); loopback-sicher via devPublish/wdCheck; /status bypass_trip_count
+#define FW_VERSION  "broker-1.15.0"  // 1.15.0 (Kommando-Rate-Limit, 2026-07-17): Geraete-Writes (outputLimit/inputLimit/acMode) nur noch bei WERT-Aenderung ODER alle DEV_KEEPALIVE_MS(8s) statt jeder 2s-Antrag ungefiltert (~1 Write/s) -> Verdacht Zendure-interner Schutz/Freeze bei zu vielen Kommandos. Keep-Alive < TELE_TIMEOUT(15s) haelt Echo-Liveness. SAFE-Writes (Gate-inv/Enforcer) weiter ungedrosselt. smartMode=1-Hook PREPARED aber DEAKTIVIERT (Topic unverifiziert). Basis 1.14.0. 1.14.0 (Design-Review F3): /status-Parse hart zeitbegrenzt (setTimeout(200)+1,5s-Deadline) -> troepfelnder Slow-Client kann keinen TASK_WDT-Reboot ausloesen. Basis 1.13.0. 1.13.0: /status-Handler gehaertet - kein blockierendes client.flush() mehr (frueh-schliessende Waechter-controlAlive-Clients konnten den Loop >12s blocken -> TASK_WDT). Basis 1.12.0. 1.12.0: Enforcer-Margin 10s->15s (Defense-in-Depth ggn. Reconnect-Fehltrips; Root-Fix im Regler 1.19.0). Basis 1.11.0. 1.11.0: Gate g Increment 2 - OVERRIDE-WATCHDOG: fremde Direkt-Publishes auf Zendure/.../{out,in}Limit/set -> sofort Safe(0); loopback-sicher via devPublish/wdCheck; /status bypass_trip_count
 SET_LOOP_TASK_STACK_SIZE(12288);     // loop-Task-Stack auf 12 KB anheben (Default 8192); Arduino-ESP32-Makro
 uint32_t bootCount = 0;              // persistenter Reset-Zaehler (NVS) -> erkennt Resets ueber Neustarts hinweg
 const uint32_t WDT_TIMEOUT_MS = 12000;  // HW-Watchdog: loop-Hang laenger -> Reboot. 12s faengt auch etwas
@@ -100,6 +100,18 @@ const char* T_CMD_OUTLIMIT = "regler/cmd/outputLimit";
 const char* T_CMD_INLIMIT  = "regler/cmd/inputLimit";
 const char* T_CMD_ACMODE   = "regler/cmd/acMode";
 const char* T_SOC          = "Zendure/sensor/" ZEN_DEV "/electricLevel";   // fuer I4 (SoC-Floor)
+
+// ---- RATE-LIMIT der Geraete-Writes (2026-07-17): Verdacht, dass zu haeufige Kommandos am Zendure-Eingang einen
+//   internen Schutz/Freeze ausloesen (bisher wurde JEDER 2s-Antrag ungefiltert ans Geraet durchgereicht -> ~1 Write/s,
+//   dazu acMode). NEU: Geraete-Write nur bei WERT-AENDERUNG oder alle DEV_KEEPALIVE_MS. Keep-Alive < Regler-
+//   TELE_TIMEOUT_MS(15s), damit die Echo-/Kontakt-Liveness erhalten bleibt (Geraet echot jeden Write ~1s). SAFE-
+//   Writes (Gate-inv->0, Enforcer) laufen weiter UNGEDROSSELT ueber devPublish().
+const unsigned long DEV_KEEPALIVE_MS = 8000;   // 8s < 15s -> Echo bleibt frisch; ~4x weniger Writes, kein Dauer-Spam
+// ---- smartMode (PREPARED, DEAKTIVIERT): offizieller Zendure-Client sendet smartMode=1 ("nicht ins Flash schreiben,
+//   empfohlen fuer haeufige Aenderungen", vgl. Issue #1505). TOPIC/Entity-Typ (number/switch/select?) NOCH ZU
+//   VERIFIZIEREN -> erst nach Verifikation SMARTMODE_ENABLE=true setzen.
+const bool  SMARTMODE_ENABLE = false;
+const char* T_SMARTMODE_SET  = "Zendure/number/" ZEN_DEV "/smartMode/set";   // UNVERIFIZIERT
 const bool          ENFORCER_ENABLE     = true;   // MASTER: Enforcer scharf. 2026-07-10 Nachtlauf (L2 fuer unbeaufsichtigt scharfen Regler)
 const unsigned long ENFORCER_TIMEOUT_MS = 15000;  // Heartbeat laenger weg -> Regler gilt als tot. 2026-07-12 10s->15s: Defense-in-Depth, toleriert einen kurzen sauberen Reconnect (~2s Luecke) ohne Fehltrip; bleibt eng genug fuer echten Regler-Tod (Geraet haelt Sollwert, SoC-Floor+Backstops als tiefere Ebene). Root-Fix der langen Luecken sitzt im Regler (1.19.0 Reconnect-Haertung).
 const unsigned long ENFORCER_REPUB_MS   = 1000;   // solange still: out=0 + in=0 alle 1s neu senden
@@ -134,6 +146,7 @@ const bool          WATCHDOG_ENABLE = true;   // Override-Watchdog aktiv?
 const unsigned long WD_MATCH_MS     = 800;    // Fenster: Loopback des eigenen Publishes vs. fremder Publish
 SentRec  wdOut = { "", 0 };                   // letzter eigener outputLimit/set-Wert (SentRec s. oben, vor onNetEvent)
 SentRec  wdIn  = { "", 0 };                   // letzter eigener inputLimit/set-Wert
+SentRec  wdAc  = { "", 0 };                   // acMode-Dedup (nur Rate-Limit, NICHT Watchdog)
 uint32_t bypassTripCount = 0;                 // wie oft ein Fremd-/Bypass-Publish ueberschrieben wurde
 
 // Geraete-Write MIT Merken (fuer den Watchdog): erst {Wert,Zeit} sichern, DANN publishen (reentrant-sicher).
@@ -141,6 +154,13 @@ void devPublish(SentRec &rec, const char* topic, const char* payload) {
   strncpy(rec.pl, payload, sizeof(rec.pl) - 1); rec.pl[sizeof(rec.pl) - 1] = '\0';
   rec.t = millis();
   mqtt.publish(topic, payload);
+}
+// Rate-limitierter Geraete-Write: schreibt nur bei WERT-Aenderung ODER wenn seit dem letzten Write >= DEV_KEEPALIVE_MS
+//   vergangen sind (Echo-Liveness + QoS0-Robustheit). Reduziert die Kommando-Last am Zendure-Eingang. rec.pl/rec.t
+//   bleiben konsistent fuer den Override-Watchdog (Skip aendert den gemerkten letzten Wert NICHT).
+void devPublishRL(SentRec &rec, const char* topic, const char* payload) {
+  if (strcmp(payload, rec.pl) == 0 && (millis() - rec.t) < DEV_KEEPALIVE_MS) return;   // unveraendert + noch frisch -> skip
+  devPublish(rec, topic, payload);
 }
 // Watchdog: erscheint auf einem Geraete-/set-Topic ein Wert, den wir NICHT gerade selbst gesendet haben
 //   (Bypass am Gate vorbei) -> sofort Safe(0) erzwingen (und als eigen merken).
@@ -162,7 +182,7 @@ void gateForwardOutput(const char* p) {                 // ENTLADEN-Antrag
   else if (v > (long)DEV_MAX_W)                                   inv = 1;   // I1: nie ueber Geraete-Physik
   else if (v > 0 && gateSoc >= 0 && gateSoc <= (int)MON_SOC_FLOOR) inv = 4;  // I4: kein Entladen unter Floor
   if (inv) { monTripCount++; lastTripInv = inv; devPublish(wdOut, T_OUTLIMIT_SET, "0"); return; }
-  devPublish(wdOut, T_OUTLIMIT_SET, p);                  // gueltig -> Original ans Geraet
+  devPublishRL(wdOut, T_OUTLIMIT_SET, p);                // gueltig -> Original ans Geraet (rate-limitiert: Aenderung/Keep-Alive)
 }
 void gateForwardInput(const char* p) {                  // LADEN-Antrag (kein SoC-Floor: Laden kann nicht tiefentladen)
   char* end = nullptr; long v = strtol(p, &end, 10);
@@ -171,11 +191,15 @@ void gateForwardInput(const char* p) {                  // LADEN-Antrag (kein So
   else if (v < 0)               inv = 2;
   else if (v > (long)DEV_MAX_W) inv = 1;
   if (inv) { monTripCount++; lastTripInv = inv; devPublish(wdIn, T_INLIMIT_SET, "0"); return; }
-  devPublish(wdIn, T_INLIMIT_SET, p);
+  devPublishRL(wdIn, T_INLIMIT_SET, p);                 // rate-limitiert (Aenderung/Keep-Alive)
 }
 void gateForwardAcMode(const char* p) {                 // nur bekannte Modi weiterreichen
-  if (strcmp(p, "Output mode") == 0 || strcmp(p, "Input mode") == 0) mqtt.publish(T_ACMODE_SET, p);
-  else { monTripCount++; lastTripInv = 16; }
+  if (strcmp(p, "Output mode") == 0 || strcmp(p, "Input mode") == 0) {
+    if (strcmp(p, wdAc.pl) == 0 && (millis() - wdAc.t) < DEV_KEEPALIVE_MS) return;    // unveraendert + frisch -> skip (Rate-Limit)
+    strncpy(wdAc.pl, p, sizeof(wdAc.pl) - 1); wdAc.pl[sizeof(wdAc.pl) - 1] = '\0'; wdAc.t = millis();
+    mqtt.publish(T_ACMODE_SET, p);
+    if (SMARTMODE_ENABLE) mqtt.publish(T_SMARTMODE_SET, "1");   // PREPARED (deaktiviert): offizielle Form / Flash-Schonung
+  } else { monTripCount++; lastTripInv = 16; }
 }
 
 void setup() {

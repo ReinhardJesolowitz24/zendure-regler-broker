@@ -112,6 +112,11 @@ const long SOC_STOP_DISCHARGE = 30;   // % - bei/unter diesem SoC NICHT mehr ent
 const long SOC_RESUME_HYST    = 3;    // % - Hysterese: Freigabe erst ab (STOP+HYST) bzw. (CHARGE-HYST) -> beide Richtungen
 const long SOC_STOP_CHARGE    = 98;   // % - bei/ueber diesem SoC NICHT mehr laden (Lade-Decke, analog 30%-Floor).
                                       //   Verhindert Windup gegen die volle Batterie; BMS/socSet schuetzen zusaetzlich.
+// Deadlock-Bruch bei Standby-SoC-Staleness (2026-07-17, s. computeSetpoint 1b): letzter SoC muss KOMFORTABEL ueber
+//   dem 30%-Floor liegen, damit Entladen trotz veralteter SoC erlaubt wird (im Standby wurde NICHT entladen -> der
+//   letzte hohe SoC stimmt noch). 50% = Floor(30)+Hyst(3)+grosse Marge. Blind-Entladen zeitlich begrenzt (Sicherheitsnetz).
+const long          SOC_STALE_DISCHARGE_OK    = 50;      // % - nur bei letztem SoC >= diesem: Entladen trotz alter SoC erlaubt
+const unsigned long SOC_STALE_OVERRIDE_MAX_MS = 300000;  // 5min - max. blind entladen ohne frischen SoC, dann doch hart sperren
 
 // ---- Reglerparameter (PI, BEWUSST OHNE D) ----------------------------------------------------
 //   D weggelassen: wuerde Messrauschen verstaerken + vertraegt sich schlecht mit der ~10s
@@ -173,7 +178,7 @@ const uint16_t MON_DISCHARGE_MAX_W = 2400;   // unabhaengig von ZEN_MAX_W
 const uint16_t MON_CHARGE_MAX_W    = 2400;   // unabhaengig von ZEN_CHARGE_MAX_W
 
 // ---- Firmware-Version (fuer /status + Baseline-/Versions-Check) -------------
-#define FW_VERSION  "regler-1.23.0"  // 1.23.0 (Design-Review-Fixes): F1 Grid-Blind-Eskalation (Shelly >12,5min blind -> Sollwert slew-sanft auf idle, deckelt Fehlerfall-Energie ~0,5kWh; ctrlSocOld deckt nur Zendure-Tele nicht Shelly); F3 /status-Parse hart zeitbegrenzt (Slow-Client kann keinen TASK_WDT ausloesen); F4 readShelly-Timeout 1000->300ms (~700ms/Poll gespart). Basis 1.22.0. 1.22.0: /status-Handler gehaertet - kein blockierendes client.flush() mehr (frueh-schliessende Waechter-controlAlive-Clients konnten den Loop >12s blocken -> TASK_WDT). Basis 1.21.0. 1.21.0: STOERUNG = RUHIG BLEIBEN - bei Grid-/Tele-Staleness Sollwert HALTEN (Integrator einfrieren) statt auf 0, Grenzen (Leistung+SoC) gelten weiter; kein Zendure-Stottern bei Shelly/Zendure-Aussetzern. Basis 1.20.0. 1.20.0: SANFTER Retreat (proportional RETREAT_GAIN=0.5 + Teil-Filter-Blend statt hart auf 0 -> Zendure drosselt statt zu stoppen, kein 0W-Stottern) + GRID_STALE_MS 5s->10s (kurze Shelly-Aussetzer halten letzten Sollwert). Basis 1.19.0. 1.19.0: MQTT-Reconnect-Haertung - eindeutiger Client-Name je Connect (keine Session-Kollision) + setSocketTimeout(4)/setKeepAlive(10) (Reconnect friert Loop/Heartbeat nicht 15s ein) -> beseitigt ~27s-Heartbeat-Luecken -> keine Enforcer-Fehltrips. Basis 1.18.0 (GATE g). 1.18.0: publishSetpoint stellt ANTRAEGE auf regler/cmd/* (Broker validiert+ist einziger Geraete-Schreiber); interner L1-Monitor. BROKER MUSS mit GATE_ENABLE laufen (zuerst flashen!)
+#define FW_VERSION  "regler-1.24.0"  // 1.24.0 (Standby-Deadlock-Bruch): ctrlSocOld sperrte Entladen bei SoC-Wert >10min alt; im Zendure-Standby sendet das Geraet keinen SoC -> Deadlock (gemessen 13,5min voller Netzbezug bei 97% SoC trotz Last). NEU: bei letztem SoC >= SOC_STALE_DISCHARGE_OK(50%) Entladen trotz alter SoC erlaubt (weckt Geraet -> frischer SoC -> Normalbetrieb), Blind-Entladen begrenzt auf SOC_STALE_OVERRIDE_MAX_MS(5min) dann Hart-Sperre; letzter SoC<50% ODER Timeout -> unveraendert konservativ sperren. Diagnose soc_stale_override in /status. NICHT-Ziel/OFFEN: zout_w meldet 0 trotz realer Abgabe (Telemetrie-Bug, separat). Basis 1.23.0. 1.23.0 (Design-Review-Fixes): F1 Grid-Blind-Eskalation (Shelly >12,5min blind -> Sollwert slew-sanft auf idle, deckelt Fehlerfall-Energie ~0,5kWh; ctrlSocOld deckt nur Zendure-Tele nicht Shelly); F3 /status-Parse hart zeitbegrenzt (Slow-Client kann keinen TASK_WDT ausloesen); F4 readShelly-Timeout 1000->300ms (~700ms/Poll gespart). Basis 1.22.0. 1.22.0: /status-Handler gehaertet - kein blockierendes client.flush() mehr (frueh-schliessende Waechter-controlAlive-Clients konnten den Loop >12s blocken -> TASK_WDT). Basis 1.21.0. 1.21.0: STOERUNG = RUHIG BLEIBEN - bei Grid-/Tele-Staleness Sollwert HALTEN (Integrator einfrieren) statt auf 0, Grenzen (Leistung+SoC) gelten weiter; kein Zendure-Stottern bei Shelly/Zendure-Aussetzern. Basis 1.20.0. 1.20.0: SANFTER Retreat (proportional RETREAT_GAIN=0.5 + Teil-Filter-Blend statt hart auf 0 -> Zendure drosselt statt zu stoppen, kein 0W-Stottern) + GRID_STALE_MS 5s->10s (kurze Shelly-Aussetzer halten letzten Sollwert). Basis 1.19.0. 1.19.0: MQTT-Reconnect-Haertung - eindeutiger Client-Name je Connect (keine Session-Kollision) + setSocketTimeout(4)/setKeepAlive(10) (Reconnect friert Loop/Heartbeat nicht 15s ein) -> beseitigt ~27s-Heartbeat-Luecken -> keine Enforcer-Fehltrips. Basis 1.18.0 (GATE g). 1.18.0: publishSetpoint stellt ANTRAEGE auf regler/cmd/* (Broker validiert+ist einziger Geraete-Schreiber); interner L1-Monitor. BROKER MUSS mit GATE_ENABLE laufen (zuerst flashen!)
 SET_LOOP_TASK_STACK_SIZE(12288);     // loop-Task-Stack auf 12 KB anheben (Default 8192); Arduino-ESP32-Makro
 uint32_t bootCount = 0;              // persistenter Reset-Zaehler (NVS) -> erkennt Resets ueber Neustarts hinweg
 
@@ -192,6 +197,8 @@ float ctrlInteg   = 0.0f;      // Regler-Integratorzustand (global -> /status-Di
 bool  ctrlBlocked = false;     // Entlade-Sperre aktiv (SoC-Floor) (global -> /status)
 bool  ctrlChargeBlocked = false;// Lade-Sperre aktiv (SoC-Decke) (global -> /status)
 bool  ctrlSocOld  = false;     // SoC-Wert zu alt (Link lebt, aber kein SoC) -> Entladen gesperrt (global -> /status)
+bool  ctrlSocStaleOverride = false; // Entladen trotz alter SoC erlaubt (Standby-Deadlock-Bruch, letzter SoC hoch) (global -> /status)
+unsigned long socStaleOverrideMs = 0; // Start des Blind-Entladens bei alter SoC (0=inaktiv); Timeout = SOC_STALE_OVERRIDE_MAX_MS
 int   ctrlActMode = 0;         // 0=idle 1=entladen 2=laden (global -> /status)
 bool  ctrlGridStale = false;   // Netzdaten veraltet -> Regler haelt sicheren Zustand (global -> /status)
 bool  ctrlTeleStale = false;   // Zendure-Telemetrie veraltet -> SoC ungueltig -> sicherer Zustand (global -> /status)
@@ -328,7 +335,24 @@ long computeSetpoint() {
   else if (zSoc >= SOC_STOP_DISCHARGE + SOC_RESUME_HYST) ctrlBlocked = false;        // erst mit Hysterese raus
   if (zSoc >= SOC_STOP_CHARGE)                           ctrlChargeBlocked = true;   // Lade-Sperre rein
   else if (zSoc <= SOC_STOP_CHARGE - SOC_RESUME_HYST)    ctrlChargeBlocked = false;  // erst mit Hysterese raus
-  long hiLimit = (ctrlBlocked || ctrlSocOld) ? 0 :  ZEN_MAX_W;         // Entladen: Floor ODER SoC-zu-alt sperrt
+
+  // 1b-DEADLOCK-BRUCH (2026-07-17): Im Zendure-STANDBY sendet das Geraet keinen SoC -> SoC veraltet (>10min) ->
+  //   ctrlSocOld sperrt Entladen -> Regler kommandiert 0 -> Geraet bleibt Standby -> kein SoC -> DEADLOCK (gemessen:
+  //   13,5min voller Netzbezug bei 97% SoC). BRUCH: war der letzte SoC KOMFORTABEL ueber dem Floor
+  //   (>= SOC_STALE_DISCHARGE_OK), ist der Akku sicher (im Standby wurde NICHT entladen -> letzter hoher SoC gilt
+  //   noch) -> Entladen ERLAUBEN. Das Kommando weckt das Geraet -> frischer SoC -> ctrlSocOld faellt -> Normalbetrieb.
+  //   SICHERHEITSNETZ: entlaedt es blind laenger als SOC_STALE_OVERRIDE_MAX_MS OHNE dass ein frischer SoC kommt
+  //   (Geraet ignoriert das Kommando dauerhaft), doch hart sperren. Der Blind-Timer laeuft NUR waehrend echten
+  //   Entladens (ctrlInteg>0); im Leerlauf/Laden zurueckgesetzt (sonst wuerde eine spaetere Last faelschlich gesperrt).
+  //   Bei letztem SoC < OK ODER Timeout: unveraendert HART sperren (konservativer Tiefentlade-Schutz).
+  if (!ctrlSocOld || ctrlInteg <= 0.0f) socStaleOverrideMs = 0;                       // frischer SoC ODER nicht am Entladen -> Timer aus
+  bool socStaleHighEnough = ctrlSocOld && (zSoc >= SOC_STALE_DISCHARGE_OK);           // letzter SoC weit ueber Floor?
+  if (socStaleHighEnough && ctrlInteg > 0.0f && socStaleOverrideMs == 0) socStaleOverrideMs = millis();  // Blindflug beginnt
+  bool socStaleBlindTooLong = (socStaleOverrideMs != 0) && (millis() - socStaleOverrideMs > SOC_STALE_OVERRIDE_MAX_MS);
+  ctrlSocStaleOverride = socStaleHighEnough && !socStaleBlindTooLong;                 // Entladen trotz alter SoC erlaubt?
+  bool dischargeSocBlock = ctrlSocOld && !ctrlSocStaleOverride;                       // stale UND (SoC niedrig ODER zu lang blind) -> sperren
+
+  long hiLimit = (ctrlBlocked || dischargeSocBlock) ? 0 :  ZEN_MAX_W;  // Entladen: Floor ODER (SoC-alt ohne sicheren Override) sperrt
   long loLimit = ctrlChargeBlocked           ? 0 : -ZEN_CHARGE_MAX_W;  // max. Laden (negativ)
 
   // 1c) STOERUNG (Shelly ODER Zendure antwortet nicht sofort): NICHT auf 0 -> Sollwert HALTEN, Integrator
@@ -339,7 +363,8 @@ long computeSetpoint() {
   //     ctrlSocOld-Sperre NICHT (die haengt an der Zendure-Tele, nicht am Shelly) -> ohne Limit wuerde blind
   //     stundenlang ent-/geladen (unerwuenschte Dauereinspeisung moeglich). Darum nach GRID_BLIND_MAX_MS den
   //     Sollwert SLEW-SANFT auf idle abbauen (kein Sprung/Stotter). Energie-Budget im Fehlerfall ~ 0,5 kWh
-  //     (12,5 min x 2400 W). Tele-Stale-Fall bleibt durch ctrlSocOld gedeckt.
+  //     (12,5 min x 2400 W). Tele-Stale-Fall (Zendure blind): Entladen bei letztem hohen SoC bis
+  //     SOC_STALE_OVERRIDE_MAX_MS (5min) erlaubt, danach ctrlSocOld-Sperre (s. 1b Deadlock-Bruch).
   ctrlGridStale = (lastShellyMs == 0) || (millis() - lastShellyMs > GRID_STALE_MS);
   ctrlTeleStale = (lastTele == 0)     || (millis() - lastTele    > TELE_TIMEOUT_MS);
   if (ctrlGridStale || ctrlTeleStale) {
@@ -480,14 +505,14 @@ void handleHttpStatus() {
   long teleAge   = (lastTele == 0)    ? -1 : (long)((millis() - lastTele) / 1000UL);
   long socAge    = (lastSocMs == 0)   ? -1 : (long)((millis() - lastSocMs) / 1000UL);
   long shellyAge = (lastShellyMs == 0)? -1 : (long)((millis() - lastShellyMs) / 1000UL);
-  char body[832];
+  char body[912];
   int n = snprintf(body, sizeof(body),
     "{\"fw\":\"%s\",\"build\":\"%s %s\",\"role\":\"regler\",\"actuate\":%s,"
     "\"uptime_s\":%lu,\"boot_count\":%lu,\"reset_reason\":%d,\"free_heap\":%u,\"heap_min\":%u,\"stack_min\":%u,"
     "\"eth_up\":%s,\"ip\":\"%s\",\"mac\":\"%s\","
     "\"mqtt_connected\":%s,\"grid_w\":%ld,\"grid_filt_w\":%ld,\"soc\":%ld,\"zout_w\":%ld,\"setpoint_w\":%ld,"
     "\"integ\":%ld,\"fehler_w\":%ld,\"delta_w\":%ld,\"slew_active\":%s,\"deadband_active\":%s,"
-    "\"grid_stale\":%s,\"tele_stale\":%s,\"discharge_blocked\":%s,\"charge_blocked\":%s,\"soc_old\":%s,\"act_mode\":%d,\"saturated\":%s,"
+    "\"grid_stale\":%s,\"tele_stale\":%s,\"discharge_blocked\":%s,\"charge_blocked\":%s,\"soc_old\":%s,\"soc_stale_override\":%s,\"act_mode\":%d,\"saturated\":%s,"
     "\"tele_age_s\":%ld,\"soc_age_s\":%ld,\"shelly_ok\":%s,\"shelly_age_s\":%ld,"
     "\"pub_count\":%lu,\"tele_count\":%llu,\"shelly_fail\":%lu,\"shelly_retry\":%lu,\"mqtt_reconn\":%lu,\"retreat_count\":%lu,\"mon_trip_count\":%lu}",
     FW_VERSION, __DATE__, __TIME__, ACTUATE_ENABLE ? "true" : "false",
@@ -497,7 +522,7 @@ void handleHttpStatus() {
     eth_up ? "true" : "false", ETH.localIP().toString().c_str(), ETH.macAddress().c_str(),
     mqtt.connected() ? "true" : "false", gridPowerW, (long)(gridPowerFilt >= 0.0f ? gridPowerFilt + 0.5f : gridPowerFilt - 0.5f), zSoc, zOutW, setpointW,
     (long)(ctrlInteg + 0.5f), ctrlFehler, ctrlDelta, ctrlSlew ? "true" : "false", ctrlDeadband ? "true" : "false",
-    ctrlGridStale ? "true" : "false", ctrlTeleStale ? "true" : "false", ctrlBlocked ? "true" : "false", ctrlChargeBlocked ? "true" : "false", ctrlSocOld ? "true" : "false", ctrlActMode, (setpointW >= ZEN_MAX_W || setpointW <= -ZEN_CHARGE_MAX_W) ? "true" : "false",
+    ctrlGridStale ? "true" : "false", ctrlTeleStale ? "true" : "false", ctrlBlocked ? "true" : "false", ctrlChargeBlocked ? "true" : "false", ctrlSocOld ? "true" : "false", ctrlSocStaleOverride ? "true" : "false", ctrlActMode, (setpointW >= ZEN_MAX_W || setpointW <= -ZEN_CHARGE_MAX_W) ? "true" : "false",
     teleAge, socAge, shellyOk ? "true" : "false", shellyAge,
     (unsigned long)cntPub, (unsigned long long)cntTele, (unsigned long)cntShellyFail, (unsigned long)cntShellyRetry, (unsigned long)cntMqttReconn, (unsigned long)cntRetreat, (unsigned long)cntMonTrip);
   if (n < 0) n = 0; else if (n >= (int)sizeof(body)) n = (int)sizeof(body) - 1;  // Content-Length nie > tatsaechlich gesendet
