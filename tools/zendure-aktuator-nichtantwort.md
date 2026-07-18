@@ -287,8 +287,33 @@ kommandiert der Regler **sofort** Entladen (Sollwert in ~10 s auf 2400), aber da
 
 ---
 
+## 14. Nacht-Validierung 07-17/18 (beobachtung_20260717_nacht.csv, 1858 Samples @ 30 s, 15,5 h)
+
+Gesamt-Paket unter echter Lade-/Entladelast über eine volle Nacht: **regler-1.24.0 + broker-1.15.0 (Rate-Limit) +
+socSet 99 % + Zendure V2.0.1**. Zeitraum 18:25 → 09:59.
+
+| Kriterium | Ergebnis |
+|---|---|
+| **Stabilität** | makellos — **0 Reboots, 0 Reconnects** über 15,5 h, Enforcer flat |
+| **Freeze/Deadlock** | **keiner** — `soc_old`/`soc_stale_ovr` **0/0**; nur 7/1858 kurze `tele_stale` (≤30 s, self-corrected) |
+| **socSet** | **990 (99 %) durchgehend gehalten** — HEMS hat nicht zurückgesetzt |
+| **SoC** | **91–98 %** — nie 100 % (Lockup vermieden), nie am 30 %-Floor; sicher zykliert |
+| **Aktivität** | 757× Laden, 633× Entladen, 468× idle — Entladepfad intensiv geprüft |
+| **Regelgüte 00–06** (n=716) | **Median −28 W** (Ziel −25), **99 % im Band [−75..25]**, p5 −52 / p95 0 |
+| **Entlade-Tracking** | 241 liefernde Samples, mittl. `|setpoint − outputHomePower|` = **14 W** |
+| **Wake-Latenz** | 9/633 Entlade-Samples (~1,4 %) — bekanntes Sleep→Wake-Verhalten, vernachlässigbar |
+
+**Urteil:** Das Gesamt-Paket ist über eine volle Nacht unter echter Last **bestanden** — kein Freeze, kein Deadlock,
+99 % Zielgenauigkeit, punktgenaues Tracking, socSet-Workaround HEMS-fest. Was UNSER Code beeinflusst, läuft
+rock-solid. **Verbleibende (optionale) Baustelle:** geräteseitige Wake-Latenz ~15–20 s (Anti-Standby-Kandidat §13).
+Randbedingung: `socSet=99 %` muss HEMS-fest bleiben (100 %-Lockup-Schutz, #1505).
+
+---
+
 ## Änderungshistorie
 - **2026-07-16 (a):** Erstfassung auf Basis Dauerlauf 07-13/14 (Fable-Review). Beweis-Sammlung offen.
+- **2026-07-18 (d):** §14 Nacht-Validierung 07-17/18 — Gesamt-Paket über 15,5 h bestanden (0 Reboots, kein
+  Freeze/Deadlock, socSet 99 % gehalten, Regelgüte 99 % im Band, Tracking 14 W; Wake-Latenz als einzige Rest-Schwäche).
 - **2026-07-17 (c):** Live-Lasttest: §9 Deadlock (gefixt 1.24.0), §10 Firmware-Freeze, `zout_w`-Bug, §11 V2.0.1 +
   MQTT-Trigger-Verdacht, §12 Sleep bestätigt + `ts` untauglich + Rate-Limit läuft, §13 Wake-Latenz ~15–20 s.
 - **2026-07-17 (c):** Live-Lasttest: Root Cause §9 (Regler-Entlade-Sperre-Deadlock, gefixt regler-1.24.0),
