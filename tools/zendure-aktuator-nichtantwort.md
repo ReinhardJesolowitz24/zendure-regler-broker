@@ -310,6 +310,45 @@ Randbedingung: `socSet=99 %` muss HEMS-fest bleiben (100 %-Lockup-Schutz, #1505)
 
 ---
 
+## 15. Unabhängiges Fable-5-Review 07-18 (Ergebnisse + V2.0.1-Netzlage) — offene Risiken & Priorisierung
+
+Unabhängige Prüfung nach V2.0.1 + regler-1.24.0 + broker-1.15.0. Kernbotschaft: Debugging-Qualität hoch, **Fixes
+richtig gerichtet, aber NICHT vollständig validiert**; die „User-Sturm"-Einschätzung zu V2.0.1 war überzeichnet.
+
+**Kritik an unseren Fixes:**
+- **Deadlock-Fix (1.24.0) im Anforderungsfall UNGETESTET:** in der Nacht `soc_old`/`soc_stale_ovr` = 0/0 → Override nie
+  gefeuert. Zudem **SoC-Band <50 % ungetestet** → Deadlock-Restrisiko dort (Winter). Besserer Fix (aktiver HTTP-Poll
+  von `electricLevel` bei stale SoC) liegt ungenutzt; `electricLevel`-Frische im **Tief-Standby** unverifiziert.
+- **Rate-Limit (1.15.0) evtl. am falschen Problem:** dokumentiertes Schreibpfad-Risiko ist **fehlendes `smartMode:1`**
+  (Flash-Verschleiß im Gerät), nicht die Rate. → smartMode hochpriorisieren.
+- **Nacht-Validierung deckt Fehlerräume nicht:** 99 %-Decke nie erreicht (**socSet-Workaround unbewiesen**), Override nie
+  gefeuert, kein Tief-Standby+Lastsprung, HEMS-Nicht-Reset unverstanden (≠ „HEMS-fest").
+
+**V2.0.1-Netzlage (VORSICHT — Frühbild ~2 Tage, dünn; Foren-Meinungen mit Vorbehalt):**
+- Fixt den 100-%-/SOCFULL-Lockup **nicht** ([d/29969](https://forum.zendure.com/d/29969); #1505/#1503 offen; kein Zendure-Statement).
+- Ein belegter neuer 2.0.1-Bug: [d/29977](https://forum.zendure.com/d/29977) — **HEMS-Nulleinspeisung („Einspeisung verboten") kaputt**,
+  manuelle/HA-Steuerung ok. Kein V2.0.2/Changelog gefunden; **Downgrade praktisch nicht verfügbar**; lokaler Pfad intakt.
+- Wake-Latenz + **Relais-Verschleiß** (durch wiederholtes `outputLimit=0`) unabhängig bestätigt ([d/29968](https://forum.zendure.com/d/29968)); Community-Gegenmittel = Mindest-Output.
+- Neu (GitHub): [PR#1506](https://github.com/Zendure/Zendure-HA/pull/1506) `inverseMaxPower` fluktuiert (800 statt 2400) → Gerät verwirft Kommandos darüber (stille Nicht-Antwort); [#1514](https://github.com/Zendure/Zendure-HA/issues/1514) stille Readback-Freezes im Lokalmodus.
+
+**Nutzer-Einordnung (07-18):** Foren-Meinungen mit Vorsicht behandeln. Zendure-SW hat erfahrungsgemäß (schon V2.0.0)
+ein **starkes Einschwing-/Neustart-Verhalten** → die gestrige Instabilität war evtl. teils Einschwingen nach Update +
+unseren Eingriffen (MQTT/HEMS-Toggles, Power-Cycles). **Diese Nacht-Validierung = BASELINE; in ~1 Woche (≈07-25) erneut
+abgleichen** (settled vs. jetzt).
+
+**Neue offene Risiken:** (1) **HEMS-Warm-Standby-Failover evtl. gebrochen** (d/29977 → würde einspeisen statt nullregeln;
+Failover-Pfad + `gridReverse=Disallow`-Backstop testen); (2) Override-Pfad ungetestet; (3) `inverseMaxPower`-Fluktuation
+(mitloggen); (4) `electricLevel`-Frische Tief-Standby; (5) Relais-Zyklen durch Retreat-auf-0; (6) SoC<50 %/Ladepfad-niedrig.
+
+**Angepasste Priorität (WENN wir handeln, kein Sofort-Zwang):** 1. **Freeze-Detektor** (tele_age+grid, L3-Alarm, verstärkt
+durch #1514); 2. **smartMode:1** (Flash + offizielle Form); 3. Tests: socSet-Decke (starker PV-Tag), Deadlock-Override,
+HEMS-Failover; 4. `inverseMaxPower` mitloggen; 5. Mindest-Output erwägen (Wake-Latenz + Relais); 6. `zout_w` klären/streichen.
+
+**SOFORT-HANDLUNGSBEDARF: KEINER.** System stabil (Nacht-Validierung), `socSet=99 %` schützt den bekannten Lockup.
+Alles Weitere = Tests/Diagnose/Slow-Burn. Zendure einschwingen lassen, in 1 Woche abgleichen.
+
+---
+
 ## Änderungshistorie
 - **2026-07-16 (a):** Erstfassung auf Basis Dauerlauf 07-13/14 (Fable-Review). Beweis-Sammlung offen.
 - **2026-07-18 (d):** §14 Nacht-Validierung 07-17/18 — Gesamt-Paket über 15,5 h bestanden (0 Reboots, kein
