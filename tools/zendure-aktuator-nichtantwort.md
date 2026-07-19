@@ -349,6 +349,38 @@ Alles Weitere = Tests/Diagnose/Slow-Burn. Zendure einschwingen lassen, in 1 Woch
 
 ---
 
+## 16. Fable-Web/GitHub-Recherche 07-18 — Verbesserungen + Umsetzungsplan
+
+**#1505 wurde HEUTE (07-18) INTEGRATIONSSEITIG geschlossen** (PR #1506/#1507), **kein Firmware-Fix, kein V2.0.2**.
+
+**Sofort verifiziert (read-only, kein Code nötig):**
+- ✅ **gridReverse-Backstop korrekt:** Gerät meldet `gridReverse=2` (FORBIDDEN) auf unser „Disallow backflow" →
+  PR-#1512-Dreiwert-Stolperstein (0/1/2) trifft uns nicht.
+- ✅ **3.-MQTT-Client = Reconnect-Overlap** ([#1519](https://github.com/Zendure/Zendure-HA/issues/1519): Zendure nutzt wechselnde Client-IDs +
+  „session taken over") → §8-Deutung bestätigt, kein Fremd-Client, kein Alarm nötig.
+- ✅ **„ZEN STALE"-Semantik** = „Telemetrie tot", nicht „Gerät tot" ([#1514](https://github.com/Zendure/Zendure-HA/issues/1514)) — Label/Zustand passt.
+
+**Umsetzungsplan (aktuierungsnah → NACH dem Nacht-Dauertest, mit Gates a–g):**
+1. **smartMode-Tripel (REGLER/BROKER) — #1, offizieller Fix ([PR #1507](https://github.com/Zendure/Zendure-HA/pull/1507)).** Mechanik geklärt:
+   offizieller Client schreibt EINEN kombinierten Befehl `{properties:{smartMode:1, acMode:2, outputLimit:X,
+   inputLimit:0}}` (device.py:781), **NICHT** Einzel-Property-Topics wie wir. → **Design-Entscheidung:**
+   (a) smartMode-Einzel-Topic ergänzen (Topic verifizieren) ODER (b) Broker-Geräteschreiben auf kombiniertes
+   `properties/write`-JSON umstellen (Gate/Enforcer anpassen). Beleg heute: Gerät war `smartMode=1` → responsiv;
+   der Bug tritt auf, wenn es aus dem Smart Mode fällt (PR #1507: bare writes >90 min ignoriert). Der bestehende
+   broker-1.15.0-smartMode-Hook (deaktiviert) ist Ansatz (a) — Topic muss verifiziert werden.
+2. **inverseMaxPower-Clamp (REGLER):** Sollwert auf gemeldetes `inverseMaxPower` clampen (nur nach unten =
+   sicherheitsneutral); Telemetrie-Quelle (MQTT-Feld/HTTP) identifizieren. PR #1506: 46 Kommandos/45 min verworfen
+   bei `inverseMaxPower=800`. (Aktuell 2400 = ok; Fluktuation intermittierend.)
+3. **acMode-Cooldown ~30 s (REGLER): VERWORFEN (07-19).** In 1.25.0 vorbereitet, dann verworfen — **redundant**:
+   die bestehende Reversal-Slew (`SLEW_REVERSAL_W=120 W/Takt` im ±400-W-Band → ~14 s Nulldurchgang) schont das
+   Relais bereits *sanft*; kein Bedarfsnachweis; der bewusst non-jagende PI ist durch Dauertests abgesichert. KISS.
+   Regler bleibt 1.24.0.
+4. **Schreibtakt ≥14 s testen**, falls Freeze wiederkehrt (unser Keep-Alive = 8 s; iobroker: <14 s friert Sensoren ein).
+
+**KEIN Sofort-Flash** (Nacht-Dauertest läuft bis 07-19 10:00). Umsetzung + Flash mit Gate-Disziplin danach; smartMode zuerst.
+
+---
+
 ## Änderungshistorie
 - **2026-07-16 (a):** Erstfassung auf Basis Dauerlauf 07-13/14 (Fable-Review). Beweis-Sammlung offen.
 - **2026-07-18 (d):** §14 Nacht-Validierung 07-17/18 — Gesamt-Paket über 15,5 h bestanden (0 Reboots, kein
