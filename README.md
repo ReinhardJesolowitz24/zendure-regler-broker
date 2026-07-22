@@ -47,6 +47,7 @@ den Kreis: Shelly → Regler → Broker → Zendure → zurück.*
 
 - 2× **Waveshare ESP32-S3-ETH** ([Produkt-Wiki](https://www.waveshare.com/wiki/ESP32-S3-ETH)) — ESP32-S3R8 + onboard **W5500**, **10/100 Mbps RJ45**-Ethernet-Port, kabelgebunden — **kein WLAN, kein Display**.
 - 1× identisches Board als **Kalt-Ersatz** (dual-rollen-fähig: Regler- *oder* Broker-Ersatz).
+- **Stromverbrauch:** Regler 5 V / 150 mA (0,75 W) + Broker 5 V / 150 mA (0,75 W) = **~1,5 W** im Dauerbetrieb. Das Anker-Netzteil (2,4 A / 12 W) liefert das ~8-Fache → beide laufen weit unter Volllast (gut für 24/7). ~1,5 W ≈ **13 kWh/Jahr**.
 - **W5500-SPI-Pins** (dieses Board): SCK 13 · MISO 12 · MOSI 11 · CS 14 · IRQ 10 · RST 9. *(Andere Belegung als die Variante ESP32-S3-ETH-8DI-8RO — im Sketch ggf. anpassen.)*
 
 ## Bibliotheken
