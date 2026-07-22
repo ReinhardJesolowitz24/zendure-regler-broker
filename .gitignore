@@ -14,3 +14,6 @@ build/
 # IDE / OS
 .vscode/
 .DS_Store
+
+# Lokale Probe-/Support-Messdaten (fuer Zendure-Support, nicht fuers Repo)
+tools/zendure_probe_*.csv
