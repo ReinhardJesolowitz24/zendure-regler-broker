@@ -42,6 +42,9 @@ den Kreis: Shelly → Regler → Broker → Zendure → zurück.*
 
 ![Regler und MQTT-Broker — 2× Waveshare ESP32-S3-ETH](docs/hardware.jpg)
 
+![Broker und Regler im Dauerbetrieb — belüftete Elektro-Box im Keller, beide per Kabel-Ethernet am LAN](docs/hardware-keller-betrieb.jpg)
+*Im Dauerbetrieb: Broker (.110) und Regler (.114) kompakt in einer belüfteten Elektro-Box im Keller, beide kabelgebunden am lokalen LAN — stabile, jitterarme Regelschleife ohne WLAN-Abhängigkeit. Versorgung über ein Anker-2,4-A-Netzteil, das damit weit unter Volllast läuft (gut für 24/7).*
+
 - 2× **Waveshare ESP32-S3-ETH** ([Produkt-Wiki](https://www.waveshare.com/wiki/ESP32-S3-ETH)) — ESP32-S3R8 + onboard **W5500**, **10/100 Mbps RJ45**-Ethernet-Port, kabelgebunden — **kein WLAN, kein Display**.
 - 1× identisches Board als **Kalt-Ersatz** (dual-rollen-fähig: Regler- *oder* Broker-Ersatz).
 - **W5500-SPI-Pins** (dieses Board): SCK 13 · MISO 12 · MOSI 11 · CS 14 · IRQ 10 · RST 9. *(Andere Belegung als die Variante ESP32-S3-ETH-8DI-8RO — im Sketch ggf. anpassen.)*
