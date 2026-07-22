@@ -55,8 +55,24 @@ den Kreis: Shelly → Regler → Broker → Zendure → zurück.*
 - **mqtt_broker:** PicoMQTT · ETH/SPI/WiFi aus dem Core (PicoMQTT-Default-`WiFiServer` läuft transparent über ETH)
 
 ## Board-Einstellungen (Arduino IDE)
-- esp32 core **3.x** (W5500-SPI via `ETH.h`; die headless Steuer-Geräte brauchen kein 2.0.17 — die Display-Wächter bleiben separat darauf), Board **ESP32S3 Dev Module**, Upload Speed 921600.
-- **W5500 SPI-Pins im Sketch an dein Board anpassen.** Tipp: zuerst das mitgelieferte Beispiel *File → Beispiele → ETH → ETH_W5500* auf dem Board verifizieren (IP per Ethernet), dann passt die `ETH.begin()`-Zeile sicher.
+- **Chip:** ESP32-S3R8 (Dual-Core Xtensa LX7, 8 MB Octal-PSRAM) auf dem Waveshare ESP32-S3-ETH. Board in der IDE: **`ESP32S3 Dev Module`**.
+- **Core:** *esp32* by Espressif Systems — getestet mit **3.3.10** (jede aktuelle 3.x mit `ETH.h`/W5500 sollte laufen). Die headless Steuer-Geräte brauchen **nicht** das 2.0.x der Display-Wächter — die bleiben separat darauf.
+
+**Tools-Menü** — die kritischen Einstellungen (der Rest kann auf Default bleiben):
+
+| Einstellung | Wert | Warum |
+|---|---|---|
+| **PSRAM** | **`OPI PSRAM`** | ⚠️ muss zum S3**R8** (Octal-PSRAM) passen — falsch gesetzt bootet das Board nicht sauber |
+| **Partition Scheme** | **`Huge APP (3MB No OTA / 1MB SPIFFS)`** | Platz für den Sketch; OTA auf diesen Geräten nicht nötig |
+| Flash Size | `4MB (32Mb)` | Modul-Vorgabe (passt zum Huge-APP-Schema) |
+| Flash Mode | `QIO 80MHz` | Standard für dieses Modul |
+| CPU Frequency | `240MHz (WiFi)` | volle Leistung |
+| Arduino Runs On / Events Run On | `Core 1` | |
+| Upload Speed | `921600` | |
+| Upload Mode | `UART0 / Hardware CDC` | |
+| USB Mode | `Hardware CDC and JTAG` | |
+
+- **W5500-SPI-Pins im Sketch an dein Board anpassen.** Tipp: zuerst das mitgelieferte Beispiel *File → Beispiele → ETH → ETH_W5500* auf dem Board verifizieren (IP per Ethernet), dann passt die `ETH.begin()`-Zeile sicher.
 
 ## Einrichtung
 1. **Secrets anlegen** (beide sind `.gitignore't`, nie einchecken):
